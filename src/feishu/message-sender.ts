@@ -2,6 +2,12 @@ import * as fs from 'node:fs';
 import type * as lark from '@larksuiteoapi/node-sdk';
 import type { Logger } from '../utils/logger.js';
 
+// Feishu content audit (code 230028) blocks messages containing raw email addresses.
+const EMAIL_RE = /([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g;
+function sanitize(text: string): string {
+  return text.replace(EMAIL_RE, '$1[at]$2');
+}
+
 export class MessageSender {
   constructor(
     private client: lark.Client,
@@ -188,7 +194,7 @@ export class MessageSender {
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
-          content: JSON.stringify({ text }),
+          content: JSON.stringify({ text: sanitize(text) }),
           msg_type: 'text',
         },
       });

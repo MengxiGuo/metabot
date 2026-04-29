@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { loadAppConfig, type BotConfig } from './config.js';
@@ -192,6 +194,27 @@ async function main() {
     ...wechatHandles.map((h) => h.name),
   ];
   logger.info({ bots: allNames }, 'All bots started');
+
+  // Notify all active sessions that the bot has restarted
+  for (const handle of feishuHandles) {
+    try {
+      const sessionsFile = path.join(
+        process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot'),
+        `sessions-${handle.name}.json`,
+      );
+      if (fs.existsSync(sessionsFile)) {
+        const sessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf-8'));
+        for (const chatId of Object.keys(sessions)) {
+          handle.sender.sendText(chatId, '🔄 MetaBot 已重启完毕，所有服务恢复正常。').catch((err: any) => {
+            logger.warn({ err, chatId }, 'Failed to send restart notification');
+          });
+        }
+        logger.info({ chatCount: Object.keys(sessions).length }, 'Sent restart notifications');
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to send restart notifications');
+    }
+  }
 
   // Create task scheduler
   const scheduler = new TaskScheduler(registry, logger);

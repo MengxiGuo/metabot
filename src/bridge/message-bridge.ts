@@ -19,7 +19,7 @@ import { metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
-const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
+const QUESTION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes for user to answer
 const MAX_QUEUE_SIZE = 5; // max queued messages per chat
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour idle → abort
 const FINAL_CARD_RETRIES = 3;

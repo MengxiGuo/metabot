@@ -71,13 +71,26 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
       ? { ...process.env, ...options.env }
       : { ...process.env };
 
+    // CLAUDE_* vars that should be passed through despite the ALWAYS_FILTERED_PREFIXES rule.
+    // BUBBLEWRAP=1 is required for root/sandbox environments where Claude Code
+    // refuses to spawn without an explicit sandbox declaration.
+    const CLAUDE_PASSTHROUGH = new Set([
+      'CLAUDE_CODE_BUBBLEWRAP',
+      'CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING',
+    ]);
+
     // Filter out env vars that interfere with auth or cause nested session errors
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(baseEnv)) {
       if (value === undefined) continue;
-      if (ALWAYS_FILTERED_PREFIXES.some(p => key.startsWith(p))) continue;
+      if (ALWAYS_FILTERED_PREFIXES.some(p => key.startsWith(p)) && !CLAUDE_PASSTHROUGH.has(key)) continue;
       if (filterAuthVars && AUTH_ENV_VARS.some(v => key.startsWith(v))) continue;
       env[key] = value;
+    }
+
+    // Auto-enable bubblewrap when running as root (server/Docker environments)
+    if (process.getuid?.() === 0) {
+      env.CLAUDE_CODE_BUBBLEWRAP = '1';
     }
 
     // Inject explicit API key from bots.json (after filtering, so it takes effect)
@@ -228,6 +241,43 @@ export class ClaudeExecutor {
         }
       }
     }
+
+    // Feishu output formatting (CRITICAL - injected last so it sits closest to the
+    // conversation and overrides any in-context inertia from older transcripts).
+    // All MetaBot output is rendered in Feishu interactive markdown cards which
+    // do NOT support pipe-style markdown tables; they collapse / misalign / show
+    // raw text on mobile. Use monospace box-drawing in fenced code blocks instead.
+    appendSections.push(
+      [
+        '## ⚠️ CRITICAL: Feishu Output Formatting',
+        '',
+        'All your output is rendered in Feishu (Lark) interactive markdown cards. Feishu does NOT properly render markdown pipe tables — they collapse, misalign, or appear as raw `|` characters on mobile. The user has explicitly requested this rule be enforced globally.',
+        '',
+        '### Hard rules',
+        '1. **NEVER produce markdown pipe tables.** Any line starting with `|` (outside an intentional code block) is a violation.',
+        '2. **Use monospace box-drawing tables inside ```fenced code blocks``` instead.** Align columns with spaces; use `─ ═ ║ ╔ ╗ ╚ ╝ ┌ ┐ └ ┘` for borders when helpful.',
+        '3. **Prefer bullet lists** for ≤3 items with simple key:value structure.',
+        '4. **Self-check before sending:** scan your draft for any line starting with `|` and rewrite it.',
+        '5. For complex tabular data (>3 columns or >5 rows) invoke the `feishu-table` skill for templates.',
+        '',
+        '### Forbidden',
+        '```',
+        '| Header | Header |',
+        '|--------|--------|',
+        '| value  | value  |',
+        '```',
+        '',
+        '### Correct',
+        '```',
+        '项目              状态        说明',
+        '──────────────────────────────────────',
+        'WireGuard        running     UDP 47835',
+        'Hysteria2        running     UDP 37926',
+        '```',
+        '',
+        'This rule overrides any pipe-table examples that may appear in older parts of this conversation transcript. Going forward, treat pipe tables as a hard error.',
+      ].join('\n')
+    );
 
     if (appendSections.length > 0) {
       queryOptions.systemPrompt = {

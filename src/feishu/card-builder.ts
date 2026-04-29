@@ -9,6 +9,14 @@ export type {
 } from '../types.js';
 import type { CardState, CardStatus } from '../types.js';
 
+// Feishu content audit (code 230028) blocks messages containing raw email addresses.
+// Replace "@domain.com" with "[at]domain.com" to pass the audit.
+const EMAIL_RE = /([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g;
+
+function sanitizeForFeishu(text: string): string {
+  return text.replace(EMAIL_RE, '$1[at]$2');
+}
+
 const STATUS_CONFIG: Record<CardStatus, { color: string; title: string; icon: string }> = {
   thinking: { color: 'blue', title: 'Thinking...', icon: '🔵' },
   running: { color: 'blue', title: 'Running...', icon: '🔵' },
@@ -29,15 +37,35 @@ function truncate(text: string, max: number): string {
   return text.slice(0, max) + '…';
 }
 
-const MAX_CONTENT_LENGTH = 28000;
+// Feishu card patch API limit is 30KB total. Reserve ~5KB for card structure
+// (header, tool calls, JSON overhead). Use byte length since CJK chars = 3 bytes in UTF-8.
+const MAX_CONTENT_BYTES = 24000;
+
+function byteLength(str: string): number {
+  return Buffer.byteLength(str, 'utf-8');
+}
 
 function truncateContent(text: string): string {
-  if (text.length <= MAX_CONTENT_LENGTH) return text;
-  const half = Math.floor(MAX_CONTENT_LENGTH / 2) - 50;
+  if (byteLength(text) <= MAX_CONTENT_BYTES) return text;
+  const halfBudget = Math.floor(MAX_CONTENT_BYTES / 2) - 100;
+  let headEnd = text.length;
+  for (let i = Math.min(text.length, Math.floor(halfBudget / 2)); i >= 0; i--) {
+    if (byteLength(text.slice(0, i)) <= halfBudget) {
+      headEnd = i;
+      break;
+    }
+  }
+  let tailStart = 0;
+  for (let i = Math.max(0, text.length - Math.floor(halfBudget / 2)); i <= text.length; i++) {
+    if (byteLength(text.slice(i)) <= halfBudget) {
+      tailStart = i;
+      break;
+    }
+  }
   return (
-    text.slice(0, half) +
-    '\n\n... (content truncated) ...\n\n' +
-    text.slice(-half)
+    text.slice(0, headEnd) +
+    '\n\n... (内容过长，中间部分已省略) ...\n\n' +
+    text.slice(tailStart)
   );
 }
 
@@ -181,7 +209,37 @@ export function buildCard(state: CardState): string {
     elements,
   };
 
-  return JSON.stringify(card);
+  let json = JSON.stringify(card);
+
+  // Final safety check: Feishu patch API hard limit is 30KB
+  const MAX_CARD_BYTES = 30000;
+  if (byteLength(json) > MAX_CARD_BYTES) {
+    // Aggressively truncate responseText and rebuild
+    const shortened = state.responseText
+      ? state.responseText.slice(0, 2000) + '\n\n... (内容过长已截断，请查看 PDF) ...'
+      : '';
+    const fallbackElements: unknown[] = [];
+    if (state.toolCalls.length > 0) {
+      const toolLines = state.toolCalls.map((t) => {
+        const icon = t.status === 'running' ? '⏳' : '✅';
+        return `${icon} **${t.name}**`;
+      });
+      fallbackElements.push({ tag: 'markdown', content: toolLines.join('\n') });
+      fallbackElements.push({ tag: 'hr' });
+    }
+    if (shortened) {
+      fallbackElements.push({ tag: 'markdown', content: shortened });
+    }
+    const fallbackCard = {
+      config: { wide_screen_mode: true },
+      header: card.header,
+      elements: fallbackElements,
+    };
+    json = JSON.stringify(fallbackCard);
+  }
+
+  // Sanitize email addresses to avoid Feishu audit rejection (code 230028)
+  return sanitizeForFeishu(json);
 }
 
 export function buildHelpCard(): string {
