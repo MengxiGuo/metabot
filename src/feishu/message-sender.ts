@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import type * as lark from '@larksuiteoapi/node-sdk';
 import type { Logger } from '../utils/logger.js';
+import { archiveOutgoing, registerMsgChatMapping, lookupChatIdByMsgId } from './message-archive.js';
 
 // Feishu content audit (code 230028) blocks messages containing raw email addresses.
 const EMAIL_RE = /([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g;
@@ -29,6 +30,8 @@ export class MessageSender {
       if (!messageId) {
         this.logger.error({ resp }, 'Failed to get message_id from send response');
       }
+      if (messageId) registerMsgChatMapping(messageId, chatId);
+      try { archiveOutgoing({ chatId, type: 'card', card: JSON.parse(cardContent), msgId: messageId, isUpdate: false }, this.logger); } catch {}
       return messageId;
     } catch (err) {
       this.logger.error({ err, chatId }, 'Failed to send card');
@@ -42,6 +45,8 @@ export class MessageSender {
         path: { message_id: messageId },
         data: { content: cardContent },
       });
+      const trueChatId = lookupChatIdByMsgId(messageId) || `msg:${messageId}`;
+      try { archiveOutgoing({ chatId: trueChatId, type: 'card', card: JSON.parse(cardContent), msgId: messageId, isUpdate: true }, this.logger); } catch {}
       return true;
     } catch (err) {
       this.logger.error({ err, messageId }, 'Failed to update card');
@@ -118,6 +123,7 @@ export class MessageSender {
           msg_type: 'image',
         },
       });
+      archiveOutgoing({ chatId, type: 'image', imageKey }, this.logger);
       return true;
     } catch (err) {
       this.logger.error({ err, chatId, imageKey }, 'Failed to send image');
@@ -161,6 +167,7 @@ export class MessageSender {
           msg_type: 'file',
         },
       });
+      archiveOutgoing({ chatId, type: 'file', fileKey }, this.logger);
       return true;
     } catch (err) {
       this.logger.error({ err, chatId, fileKey }, 'Failed to send file');
@@ -188,6 +195,24 @@ export class MessageSender {
     }
   }
 
+  /**
+   * Fetch a single message by ID. Returns the message object or undefined.
+   * Used by reply-parent media fetching: when a user replies to a previous
+   * image/file message and @mentions the bot, this lets the bot retrieve
+   * the original media without requiring a separate cache.
+   */
+  async getMessage(messageId: string): Promise<any | undefined> {
+    try {
+      const resp: any = await this.client.im.v1.message.get({
+        path: { message_id: messageId },
+      });
+      return resp?.data?.items?.[0] || resp?.data;
+    } catch (err) {
+      this.logger.error({ err, messageId }, 'Failed to fetch message');
+      return undefined;
+    }
+  }
+
   async sendText(chatId: string, text: string): Promise<void> {
     try {
       await this.client.im.v1.message.create({
@@ -198,6 +223,7 @@ export class MessageSender {
           msg_type: 'text',
         },
       });
+      archiveOutgoing({ chatId, type: 'text', text }, this.logger);
     } catch (err) {
       this.logger.error({ err, chatId }, 'Failed to send text');
     }

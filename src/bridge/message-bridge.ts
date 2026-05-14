@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
+import sharp from 'sharp';
 import type { BotConfigBase } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import type { IncomingMessage, CardState, PendingQuestion } from '../types.js';
@@ -20,6 +21,26 @@ import type { SessionRegistry } from '../session/session-registry.js';
 
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes for user to answer
+
+// Anthropic Vision API caps each image at 2000px when conversation has many images.
+// Resize to 1900px max edge to leave headroom + keep aspect ratio.
+const MAX_IMAGE_DIMENSION = 1900;
+
+async function resizeImageIfNeeded(imagePath: string, logger: Logger): Promise<void> {
+  try {
+    const meta = await sharp(imagePath).metadata();
+    const width = meta.width || 0;
+    const height = meta.height || 0;
+    if (Math.max(width, height) <= MAX_IMAGE_DIMENSION) return;
+    const buf = await sharp(imagePath)
+      .resize({ width: MAX_IMAGE_DIMENSION, height: MAX_IMAGE_DIMENSION, fit: 'inside', withoutEnlargement: true })
+      .toBuffer();
+    await fsPromises.writeFile(imagePath, buf);
+    logger.info({ imagePath, before: `${width}x${height}` }, 'Resized image to fit Anthropic vision limit');
+  } catch (err) {
+    logger.warn({ err, imagePath }, 'Image resize failed; keeping original');
+  }
+}
 const MAX_QUEUE_SIZE = 5; // max queued messages per chat
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour idle → abort
 const FINAL_CARD_RETRIES = 3;
@@ -604,6 +625,7 @@ export class MessageBridge {
       imagePath = path.join(downloadsDir, `${imageKey}.png`);
       const ok = await this.sender.downloadImage(msgId, imageKey, imagePath);
       if (ok) {
+        await resizeImageIfNeeded(imagePath, this.logger);
         prompt = `${text}\n\n[Image saved at: ${imagePath}]\nPlease use the Read tool to read and analyze this image file.`;
       } else {
         prompt = `${text}\n\n(Note: Failed to download the image)`;
@@ -629,6 +651,7 @@ export class MessageBridge {
           const p = path.join(downloadsDir, `${media.imageKey}.png`);
           const ok = await this.sender.downloadImage(media.messageId, media.imageKey, p);
           if (ok) {
+            await resizeImageIfNeeded(p, this.logger);
             extraPaths.push(p);
             prompt += `\n[Image saved at: ${p}]`;
           }
@@ -1030,6 +1053,17 @@ export class MessageBridge {
       }
       try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
     }
+  }
+
+  /**
+   * Post a visible "I'm forwarding this prompt to @<toBot>" card into a chat,
+   * sent from this bridge's bot identity. Used by `mb talk` when a caller bot
+   * wants its outgoing inter-bot prompt to be visible in the real group chat
+   * (alongside the target bot's reply card).
+   */
+  async postInterBotPrompt(chatId: string, fromBot: string, toBot: string, prompt: string): Promise<void> {
+    const title = `${fromBot} → @${toBot}`;
+    await this.sender.sendTextNotice(chatId, title, prompt, 'blue');
   }
 
   async executeApiTask(options: ApiTaskOptions): Promise<ApiTaskResult> {

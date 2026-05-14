@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 /** Agent engine backing a bot. */
-export type EngineName = 'claude' | 'kimi' | 'codex';
+export type EngineName = 'claude' | 'kimi' | 'codex' | 'gemini';
 
 /** Shared config fields used by MessageBridge and Executors (platform-agnostic). */
 export interface BotConfigBase {
@@ -40,6 +40,21 @@ export interface BotConfigBase {
   };
   /** Codex-specific overrides. Populated only when engine === 'codex'. */
   codex?: CodexBotConfig;
+  /** Gemini-specific overrides. Populated only when engine === 'gemini'. */
+  gemini?: GeminiBotConfig;
+}
+
+/** Gemini-specific overrides. Populated only when engine === 'gemini'. */
+export interface GeminiBotConfig {
+  executable?: string;
+  model?: string;
+  displayModel?: string;
+  /** gemini-cli --approval-mode value. Defaults to 'yolo' (auto-approve). */
+  approvalMode?: 'default' | 'auto_edit' | 'yolo' | 'plan';
+  /** Context window size in tokens for display only. */
+  contextWindow?: number;
+  extraArgs?: string[];
+  env?: Record<string, string>;
 }
 
 /** Codex-specific overrides. Populated only when engine === 'codex'. */
@@ -146,6 +161,17 @@ export interface KimiJsonConfig {
   contextWindow?: number;
 }
 
+/** Gemini-specific overrides in bots.json. */
+export interface GeminiJsonConfig {
+  executable?: string;
+  model?: string;
+  displayModel?: string;
+  approvalMode?: 'default' | 'auto_edit' | 'yolo' | 'plan';
+  contextWindow?: number;
+  extraArgs?: string[];
+  env?: Record<string, string>;
+}
+
 /** Codex-specific overrides in bots.json. */
 export interface CodexJsonConfig {
   executable?: string;
@@ -166,6 +192,7 @@ interface EngineJsonFields {
   engine?: EngineName;
   kimi?: KimiJsonConfig;
   codex?: CodexJsonConfig;
+  gemini?: GeminiJsonConfig;
 }
 
 export interface FeishuBotJsonEntry extends EngineJsonFields {
@@ -191,6 +218,7 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
 
 function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
   const codex = buildCodexConfig(entry.codex);
+  const gemini = buildGeminiConfig(entry.gemini);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
@@ -203,6 +231,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
+    ...(gemini ? { gemini } : {}),
     feishu: {
       appId: entry.feishuAppId,
       appSecret: entry.feishuAppSecret,
@@ -233,6 +262,7 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
 
 function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
   const codex = buildCodexConfig(entry.codex);
+  const gemini = buildGeminiConfig(entry.gemini);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
@@ -244,6 +274,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
+    ...(gemini ? { gemini } : {}),
     telegram: {
       botToken: entry.telegramBotToken,
     },
@@ -271,6 +302,7 @@ export interface WebBotJsonEntry extends EngineJsonFields {
 
 export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
   const codex = buildCodexConfig(entry.codex);
+  const gemini = buildGeminiConfig(entry.gemini);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
@@ -282,6 +314,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
+    ...(gemini ? { gemini } : {}),
     claude: buildClaudeConfig(entry),
   };
 }
@@ -304,12 +337,14 @@ export interface WechatBotJsonEntry extends EngineJsonFields {
 
 function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
   const codex = buildCodexConfig(entry.codex);
+  const gemini = buildGeminiConfig(entry.gemini);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
+    ...(gemini ? { gemini } : {}),
     wechat: {
       ilinkBaseUrl: entry.ilinkBaseUrl,
       botToken: entry.wechatBotToken,
@@ -355,14 +390,28 @@ function buildCodexConfig(entry?: CodexJsonConfig): BotConfigBase['codex'] | und
   return Object.keys(cfg).length > 0 ? cfg : undefined;
 }
 
+function buildGeminiConfig(entry?: GeminiJsonConfig): BotConfigBase['gemini'] | undefined {
+  const cfg: BotConfigBase['gemini'] = {
+    ...(process.env.GEMINI_EXECUTABLE_PATH ? { executable: process.env.GEMINI_EXECUTABLE_PATH } : {}),
+    ...(process.env.GEMINI_MODEL ? { model: process.env.GEMINI_MODEL } : {}),
+    ...(process.env.GEMINI_DISPLAY_MODEL ? { displayModel: process.env.GEMINI_DISPLAY_MODEL } : {}),
+    ...(process.env.GEMINI_APPROVAL_MODE ? { approvalMode: process.env.GEMINI_APPROVAL_MODE as GeminiJsonConfig['approvalMode'] } : {}),
+    ...(process.env.GEMINI_CONTEXT_WINDOW ? { contextWindow: parseInt(process.env.GEMINI_CONTEXT_WINDOW, 10) } : {}),
+    ...(entry ?? {}),
+  };
+  return Object.keys(cfg).length > 0 ? cfg : undefined;
+}
+
 // --- Single-bot env var mode ---
 
 function feishuBotFromEnv(): BotConfig {
   const codex = buildCodexConfig();
+  const gemini = buildGeminiConfig();
   return {
     name: 'default',
     ...(process.env.METABOT_ENGINE ? { engine: process.env.METABOT_ENGINE as EngineName } : {}),
     ...(codex ? { codex } : {}),
+    ...(gemini ? { gemini } : {}),
     feishu: {
       appId: required('FEISHU_APP_ID'),
       appSecret: required('FEISHU_APP_SECRET'),
@@ -381,10 +430,12 @@ function feishuBotFromEnv(): BotConfig {
 
 function telegramBotFromEnv(): TelegramBotConfig {
   const codex = buildCodexConfig();
+  const gemini = buildGeminiConfig();
   return {
     name: 'telegram-default',
     ...(process.env.METABOT_ENGINE ? { engine: process.env.METABOT_ENGINE as EngineName } : {}),
     ...(codex ? { codex } : {}),
+    ...(gemini ? { gemini } : {}),
     telegram: {
       botToken: required('TELEGRAM_BOT_TOKEN'),
     },
@@ -402,10 +453,12 @@ function telegramBotFromEnv(): TelegramBotConfig {
 
 function wechatBotFromEnv(): WechatBotConfig {
   const codex = buildCodexConfig();
+  const gemini = buildGeminiConfig();
   return {
     name: 'wechat-default',
     ...(process.env.METABOT_ENGINE ? { engine: process.env.METABOT_ENGINE as EngineName } : {}),
     ...(codex ? { codex } : {}),
+    ...(gemini ? { gemini } : {}),
     wechat: {
       botToken: process.env.WECHAT_BOT_TOKEN || undefined,
     },

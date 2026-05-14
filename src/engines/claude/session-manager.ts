@@ -99,6 +99,16 @@ export class SessionManager {
     this.saveToDisk();
   }
 
+  /** Set per-session working directory. */
+  setSessionWorkingDirectory(chatId: string, dir: string): void {
+    const session = this.getSession(chatId);
+    session.workingDirectory = dir;
+    // Switching workdir invalidates Claude's session_id (filesystem state changes).
+    session.sessionId = undefined;
+    this.logger.info({ chatId, dir }, 'Session working directory updated');
+    this.saveToDisk();
+  }
+
   /** Set per-session model override. Pass undefined to clear. */
   setSessionModel(chatId: string, model: string | undefined): void {
     const session = this.getSession(chatId);

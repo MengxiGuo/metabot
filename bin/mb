@@ -29,20 +29,29 @@ case "$cmd" in
     curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/bots/$1" | _json
     ;;
   # --- Agent Talk (cross-instance auto-routing) ---
+  # Env var MB_CALLER_BOT, when set, marks the calling bot identity. The API
+  # then posts the outgoing prompt as a visible card under that bot's name
+  # before invoking the target — so inter-bot conversations show both sides
+  # in the real group chat.
   talk|t)
     bot="$1" chat="$2"; shift 2 2>/dev/null || true
     prompt="$*"
+    caller="${MB_CALLER_BOT:-}"
     if [[ -z "${bot:-}" || -z "${chat:-}" || -z "${prompt:-}" ]]; then
       echo "Usage: mb talk [peer/]<botName> <chatId> <prompt>"
       echo "  Examples:"
       echo "    mb talk mybot chat123 'fix the bug'"
       echo "    mb talk alice/backend-bot chat123 'deploy to staging'"
+      echo "  Optional: set MB_CALLER_BOT=<botName> to make outgoing prompt visible in chat"
       exit 1
     fi
     python3 -c "
 import json, sys
-print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'prompt': sys.argv[3], 'sendCards': True}))
-" "$bot" "$chat" "$prompt" | \
+out = {'botName': sys.argv[1], 'chatId': sys.argv[2], 'prompt': sys.argv[3], 'sendCards': True}
+if sys.argv[4]:
+    out['callerBot'] = sys.argv[4]
+print(json.dumps(out))
+" "$bot" "$chat" "$prompt" "$caller" | \
     curl -s -X POST "$METABOT_URL/api/talk" \
       -H "$METABOT_AUTH" -H "Content-Type: application/json" \
       -d @-

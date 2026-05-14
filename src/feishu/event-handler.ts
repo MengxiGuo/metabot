@@ -2,6 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { BotConfig } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import { MessageSender } from './message-sender.js';
+import { archiveIncoming } from './message-archive.js';
 
 // Re-export from shared types so existing imports continue to work
 export type { IncomingMessage } from '../types.js';
@@ -282,6 +283,45 @@ export function createEventDispatcher(
           }
         }
 
+        // If user replied to a previous message and the current message has no
+        // attachment, fetch the parent message to recover its image/file.
+        // This covers the natural workflow: user replies to a bot/user message
+        // that had an image, then @mentions the bot with a question.
+        const parentId: string | undefined = message.parent_id;
+        if (parentId && !imageKey && !fileKey && messageSender) {
+          try {
+            const parentMsg = await messageSender.getMessage(parentId);
+            if (parentMsg) {
+              const parentType = parentMsg.msg_type;
+              const parentContent = parentMsg.body?.content ? JSON.parse(parentMsg.body.content) : {};
+              const replyMedia: NonNullable<IncomingMessage['extraMedia']> = [];
+              if (parentType === 'image' && parentContent.image_key) {
+                replyMedia.push({ messageId: parentId, imageKey: parentContent.image_key });
+                logger.info({ parentId, imageKey: parentContent.image_key }, 'Fetched image from replied message');
+              } else if (parentType === 'file' && parentContent.file_key && parentContent.file_name) {
+                replyMedia.push({ messageId: parentId, fileKey: parentContent.file_key, fileName: parentContent.file_name });
+                logger.info({ parentId, fileKey: parentContent.file_key, fileName: parentContent.file_name }, 'Fetched file from replied message');
+              } else if (parentType === 'post') {
+                const postImages = extractImagesFromPost(parentContent);
+                for (const key of postImages) {
+                  replyMedia.push({ messageId: parentId, imageKey: key });
+                }
+                if (postImages.length > 0) {
+                  logger.info({ parentId, imageCount: postImages.length }, 'Fetched images from replied post message');
+                }
+              }
+              if (replyMedia.length > 0) {
+                extraMedia = extraMedia ? [...extraMedia, ...replyMedia] : replyMedia;
+              }
+            }
+          } catch (err) {
+            logger.warn({ err, parentId }, 'Failed to fetch parent message for reply');
+          }
+        }
+
+        archiveIncoming({
+          msgId: messageId, chatId, userId, type: msgType, text, imageKey, fileKey, fileName, parentId,
+        }, logger);
         onMessage({ messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName, extraMedia });
       } catch (err) {
         logger.error({ err }, 'Error handling message event');

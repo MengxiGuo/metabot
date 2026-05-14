@@ -2,6 +2,30 @@ import type * as http from 'node:http';
 import { jsonResponse, parseJsonBody } from './helpers.js';
 import type { RouteContext } from './types.js';
 
+// Prepended to target's prompt when the call comes from another bot via mb talk.
+// Default mode is honest critical evaluation, not agreeable collaboration —
+// LLM-to-LLM dialogue without this framing trends toward cheap alignment.
+const INTER_BOT_CRITICAL_EVAL_FRAMING = `## Inter-Bot Critical Evaluation Mode
+
+You are receiving this prompt via \`mb talk\` from another agent. Default mode is **honest critical evaluation**, not agreeable collaboration:
+
+1. **Stress-test first** — try to find: specific failure modes, hidden assumptions, better alternatives the caller didn't consider, edge cases where the proposal breaks.
+
+2. **Surface issues concretely** — if you find substantive issues, give specific scenarios, not vague "可能有 edge case" concerns.
+
+3. **Agreement is earned, not free** — agreement is allowed only after genuine stress-test. If you agree, explicitly state: (a) what attack vectors you considered, (b) why each failed, (c) why you conclude the proposal is sound.
+
+4. **Forbidden behaviors**:
+   - Cheap "我同意" / "完全赞同" + 补充几条 without any stress-test trace
+   - Nitpicking trivial issues to appear critical (contrarian theater)
+   - Strawmanning a weaker version of the caller's argument
+
+This applies symmetrically — when you're the caller, expect the same critical treatment back.
+
+---
+
+`;
+
 export async function handleTaskRoutes(
   ctx: RouteContext,
   req: http.IncomingMessage,
@@ -45,6 +69,7 @@ export async function handleTaskRoutes(
     const asyncMode = body.async === true;
     const callbackChatId = body.callbackChatId as string | undefined;
     const callbackBotName = body.callbackBotName as string | undefined;
+    const callerBot = body.callerBot as string | undefined;
 
     if (!rawBotName || !chatId || !prompt) {
       jsonResponse(res, 400, { error: 'Missing required fields: botName, chatId, prompt' });
@@ -101,7 +126,33 @@ export async function handleTaskRoutes(
         return true;
       }
 
-      logger.info({ botName, chatId, promptLength: prompt.length, asyncMode }, 'API talk request');
+      logger.info({ botName, chatId, promptLength: prompt.length, asyncMode, callerBot }, 'API talk request');
+
+      // If a caller bot is provided and the chatId is a real IM chat (not the
+      // grouptalk- virtual prefix), post the outgoing prompt as a visible
+      // card from the caller's identity. This way the full inter-bot dialogue
+      // (both sides) is observable in the group.
+      const isInterBotCall = !!(callerBot && callerBot !== botName && !chatId.startsWith('grouptalk-'));
+      if (isInterBotCall) {
+        const caller = registry.get(callerBot!);
+        if (caller) {
+          try {
+            await caller.bridge.postInterBotPrompt(chatId, callerBot!, botName, prompt);
+          } catch (err: any) {
+            logger.warn({ err: err.message, callerBot, targetBot: botName, chatId }, 'postInterBotPrompt failed');
+          }
+        } else {
+          logger.warn({ callerBot }, 'callerBot not found in registry — skipping inter-bot prompt card');
+        }
+      }
+
+      // For inter-bot calls, prepend critical-evaluation framing so the target
+      // doesn't default to cheap-alignment "我同意 + 补充" mode. The original
+      // `prompt` is preserved for audit logging; `effectivePrompt` is what the
+      // target actually receives.
+      const effectivePrompt = isInterBotCall
+        ? INTER_BOT_CRITICAL_EVAL_FRAMING + prompt
+        : prompt;
 
       // Async mode: accept immediately, execute in background
       if (asyncMode) {
@@ -113,7 +164,7 @@ export async function handleTaskRoutes(
           asyncTaskStore.update(asyncTask.id, { status: 'running' });
           try {
             const result = await bot.bridge.executeApiTask({
-              prompt, chatId, userId: 'api', sendCards: sendCards ?? true,
+              prompt: effectivePrompt, chatId, userId: 'api', sendCards: sendCards ?? true,
             });
             asyncTaskStore.update(asyncTask.id, {
               status: result.success ? 'completed' : 'failed',
@@ -177,7 +228,7 @@ export async function handleTaskRoutes(
       const grouptalkGroupId = grouptalkMatch ? grouptalkMatch[1] : undefined;
 
       const result = await bot.bridge.executeApiTask({
-        prompt,
+        prompt: effectivePrompt,
         chatId,
         userId: 'api',
         sendCards: sendCards ?? true,
