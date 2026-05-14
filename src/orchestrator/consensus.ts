@@ -34,6 +34,12 @@ export interface ConsensusInput {
   bots: string[];
   costCapUsd?: number;
   maxRounds?: number;
+  /** Trigger chat — consensus events surface as cards here so user can
+   *  watch the inter-bot dialogue mid-flight and intervene if needed. */
+  chatId?: string;
+  /** Caller bot name whose sender is used to post cards to chatId. Typically
+   *  the bot that triggered the consensus (e.g. quatumtrading-claude). */
+  callerBotName?: string;
 }
 
 export type ConsensusEventListener = (event: ConsensusEvent, state: ConsensusState) => void;
@@ -41,6 +47,9 @@ export type ConsensusEventListener = (event: ConsensusEvent, state: ConsensusSta
 const MAX_JSON_RETRIES = 2;
 
 export class ConsensusOrchestrator {
+  private chatId: string | undefined;
+  private callerBotName: string | undefined;
+
   constructor(
     private registry: BotRegistry,
     private logger: Logger,
@@ -51,7 +60,17 @@ export class ConsensusOrchestrator {
    * Caller may pass `onEvent` to stream progress (for card heartbeat).
    */
   async run(input: ConsensusInput, onEvent?: ConsensusEventListener): Promise<ConsensusOutput> {
+    this.chatId = input.chatId;
+    this.callerBotName = input.callerBotName;
+
     const state = this.initState(input);
+
+    // Initial card so user knows consensus has started.
+    this.postCard(
+      '🧠 Consensus 启动',
+      `Bots: ${input.bots.join(', ')}\nType: ${input.type} | Stakes: ${input.stakes}\nProblem: ${input.problem}`,
+      'blue',
+    );
 
     this.emit(state, 'phase_entered', { phase: 0 }, onEvent);
 
@@ -89,6 +108,12 @@ export class ConsensusOrchestrator {
   private async runPhase1(state: ConsensusState, onEvent?: ConsensusEventListener): Promise<void> {
     const prompt = buildPhase1Prompt(state.problem, state.type, state.stakes);
 
+    this.postCard(
+      '▶️ Phase 1: Independent Take',
+      `${state.bots.length} bots 并行独立 take (no cross-pollination)\nBots: ${state.bots.join(', ')}`,
+      'blue',
+    );
+
     // Run all bots in parallel (independence = no cross-pollination).
     const results = await Promise.allSettled(
       state.bots.map((bot) => this.invokePhase1Bot(state, bot, prompt, onEvent)),
@@ -100,14 +125,35 @@ export class ConsensusOrchestrator {
       const result = results[i];
       if (result.status === 'fulfilled' && result.value) {
         state.takes.set(bot, result.value);
+        // Surface bot's take to group so user can see what was proposed.
+        const take = result.value;
+        const counterArgs = take.knownCounterArgs.length
+          ? '\n\n**Known counter-args:**\n' + take.knownCounterArgs.map((a) => `- ${a}`).join('\n')
+          : '';
+        this.postCard(
+          `✅ ${bot} — Phase 1 take`,
+          `**Proposal:** ${take.proposal}\n\n**Reasoning:** ${take.reasoning}${counterArgs}`,
+          'green',
+        );
       } else if (state.ejected.find((e) => e.bot === bot)) {
-        // already ejected by invokePhase1Bot
+        this.postCard(`❌ ${bot} ejected (Phase 1)`, 'JSON validation failed after retries', 'red');
       } else {
         const reason = result.status === 'rejected' ? (result.reason?.message || 'unknown') : 'invalid_output';
         state.ejected.push({ bot, reason: 'json_malformed', detail: reason, phase: 1 });
         this.emit(state, 'bot_ejected', { bot, phase: 1, reason }, onEvent);
+        this.postCard(`❌ ${bot} ejected (Phase 1)`, reason, 'red');
       }
     }
+
+    const completed = state.takes.size;
+    const total = state.bots.length;
+    this.postCard(
+      `✓ Phase 1 complete (${completed}/${total} bots)`,
+      completed < 2
+        ? '⚠️ <2 bots completed — cannot continue, will fail consensus'
+        : 'Day 1 stops here. Phase 2-5 implementation pending.',
+      completed < 2 ? 'orange' : 'turquoise',
+    );
   }
 
   private async invokePhase1Bot(
@@ -257,6 +303,24 @@ export class ConsensusOrchestrator {
       `Consensus event: ${type}`,
     );
     onEvent?.(event, state);
+  }
+
+  /**
+   * Post a visible card to the trigger group so user can watch consensus
+   * mid-flight. No-op if chatId/callerBotName not provided (e.g. headless
+   * API call without UI surfacing).
+   */
+  private postCard(title: string, body: string, color: 'blue' | 'green' | 'orange' | 'red' | 'turquoise' = 'blue'): void {
+    if (!this.chatId || !this.callerBotName) return;
+    const caller = this.registry.get(this.callerBotName);
+    if (!caller) {
+      this.logger.warn({ callerBotName: this.callerBotName }, 'Consensus: caller bot not in registry, skipping card');
+      return;
+    }
+    // Fire-and-forget — don't block consensus on card delivery.
+    caller.sender.sendTextNotice(this.chatId, title, body, color).catch((err: any) => {
+      this.logger.warn({ err: err?.message, title }, 'Consensus: card post failed');
+    });
   }
 }
 

@@ -43,6 +43,8 @@ export async function handleConsensusRoutes(
     const stakes = (body.stakes ?? 'medium') as Stakes;
     const costCapUsd = typeof body.costCapUsd === 'number' ? body.costCapUsd : undefined;
     const maxRounds = typeof body.maxRounds === 'number' ? body.maxRounds : undefined;
+    const chatId = typeof body.chatId === 'string' ? body.chatId : undefined;
+    const callerBotName = typeof body.callerBotName === 'string' ? body.callerBotName : undefined;
 
     // Validation
     if (!Array.isArray(bots) || bots.length < 2) {
@@ -51,6 +53,12 @@ export async function handleConsensusRoutes(
     }
     if (bots.length > 4) {
       jsonResponse(res, 400, { error: 'Too many bots: N is capped at 4 for cost/latency reasons' });
+      return true;
+    }
+    if (new Set(bots).size !== bots.length) {
+      jsonResponse(res, 400, {
+        error: 'Duplicate bot names — must be distinct. Same-model dupes only produce sampling noise, not real epistemic diversity. Use cross-engine bots (e.g. claude + gemini + codex) for meaningful consensus.',
+      });
       return true;
     }
     if (!problem || typeof problem !== 'string') {
@@ -73,6 +81,32 @@ export async function handleConsensusRoutes(
       return true;
     }
 
+    // Pre-flight: if chatId provided (group-visible consensus), verify each
+    // target bot is actually in that chat. Consensus is an opt-in feature —
+    // user must manually invite the bot to the group to enable it for that
+    // group. Without this check, registry-based discovery would let consensus
+    // pull in bots the user never invited.
+    if (chatId) {
+      const notInChat: string[] = [];
+      for (const botName of bots) {
+        const bot = registry.get(botName);
+        if (!bot?.feishuClient) continue; // non-Feishu bot, can't verify; allow
+        try {
+          await bot.feishuClient.im.v1.chat.get({ path: { chat_id: chatId } });
+          // success → bot is in chat
+        } catch (err: any) {
+          logger.warn({ botName, chatId, err: err?.message }, 'Consensus pre-flight: bot not in chat or scope missing');
+          notInChat.push(botName);
+        }
+      }
+      if (notInChat.length > 0) {
+        jsonResponse(res, 403, {
+          error: `Bot(s) not in chat '${chatId}': ${notInChat.join(', ')}. Please invite them to the group first (consensus is opt-in per chat).`,
+        });
+        return true;
+      }
+    }
+
     // Always async — consensus is 5-15 min wall time, sync would timeout
     const asyncTask = asyncTaskStore.create({
       botName: 'consensus-orchestrator',
@@ -88,6 +122,8 @@ export async function handleConsensusRoutes(
       bots,
       ...(costCapUsd !== undefined ? { costCapUsd } : {}),
       ...(maxRounds !== undefined ? { maxRounds } : {}),
+      ...(chatId !== undefined ? { chatId } : {}),
+      ...(callerBotName !== undefined ? { callerBotName } : {}),
     };
 
     logger.info({ taskId: asyncTask.id, bots, type, stakes, problemLength: problem.length }, 'Consensus task started');
