@@ -1,3 +1,7 @@
+> 📌 **This is a personal fork of [xvirobotics/metabot](https://github.com/xvirobotics/metabot)**.
+> Adds: Gemini CLI engine, inter-bot multi-agent framework, N-bot Consensus Protocol, Pro-tier quota footer.
+> See **[FORK.md](FORK.md)** for setup steps and what's different from upstream.
+
 <div align="center">
 
 # 🤖 MetaBot

@@ -2,7 +2,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { Logger } from '../utils/logger.js';
 
-const ARCHIVE_ROOT = '/root/metabot/data/messages';
+// METABOT_HOME defaults to $HOME/metabot per the install convention.
+// Override with METABOT_HOME env var if installed elsewhere.
+const METABOT_HOME = process.env.METABOT_HOME || path.join(process.env.HOME || '/root', 'metabot');
+const ARCHIVE_ROOT = process.env.METABOT_ARCHIVE_ROOT || path.join(METABOT_HOME, 'data', 'messages');
 
 function todayUtc8(): string {
   const d = new Date();

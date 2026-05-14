@@ -1,9 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { request } from 'node:https';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const CODE_ASSIST_ENDPOINT = process.env.CODE_ASSIST_ENDPOINT || 'https://cloudcode-pa.googleapis.com';
 const CODE_ASSIST_API_VERSION = process.env.CODE_ASSIST_API_VERSION || 'v1internal';
-const OAUTH_CREDS_PATH = process.env.GEMINI_OAUTH_CREDS_PATH || '/root/.gemini/oauth_creds.json';
+const OAUTH_CREDS_PATH = process.env.GEMINI_OAUTH_CREDS_PATH || path.join(os.homedir(), '.gemini', 'oauth_creds.json');
 
 export interface QuotaBucket {
   modelId: string;
