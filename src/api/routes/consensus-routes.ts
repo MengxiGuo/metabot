@@ -92,10 +92,20 @@ export async function handleConsensusRoutes(
         const bot = registry.get(botName);
         if (!bot?.feishuClient) continue; // non-Feishu bot, can't verify; allow
         try {
-          await bot.feishuClient.im.v1.chat.get({ path: { chat_id: chatId } });
-          // success → bot is in chat
+          const resp: any = await bot.feishuClient.im.v1.chat.get({ path: { chat_id: chatId } });
+          // Feishu quirk: chats.get returns success (code 0) even when the
+          // bot is NOT a member of the chat — but the data fields come back
+          // empty/undefined. When the bot IS a member, chat_status="normal"
+          // and chat_mode is set. We use these as the membership signal.
+          // The reliable error signal would come from message.create
+          // (230002 "Bot/User can NOT be out of the chat"), but probing
+          // that would pollute the chat with a test message.
+          const d = resp?.data;
+          if (!d || !d.chat_status || !d.chat_mode) {
+            notInChat.push(botName);
+          }
         } catch (err: any) {
-          logger.warn({ botName, chatId, err: err?.message }, 'Consensus pre-flight: bot not in chat or scope missing');
+          logger.warn({ botName, chatId, err: err?.message }, 'Consensus pre-flight: chats.get failed (treat as not-in-chat)');
           notInChat.push(botName);
         }
       }
