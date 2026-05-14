@@ -2,6 +2,7 @@ export { handleVoiceRoutes } from './voice-routes.js';
 export { handleFileRoutes } from './file-routes.js';
 export { handleTeamRoutes } from './team-routes.js';
 export { handleTaskRoutes } from './task-routes.js';
+export { handleConsensusRoutes } from './consensus-routes.js';
 export { handleBotRoutes } from './bot-routes.js';
 export { handleSyncRoutes } from './sync-routes.js';
 export { handleRtcRoutes } from './rtc-routes.js';

@@ -56,6 +56,46 @@ print(json.dumps(out))
       -H "$METABOT_AUTH" -H "Content-Type: application/json" \
       -d @-
     ;;
+  # --- N-Bot Consensus Protocol ---
+  # Drives a 5-phase multi-bot discussion to reasoned consensus (or surfaces
+  # standing disagreements honestly). Async only — typical runtime 5-15 min.
+  consensus|cons)
+    subcmd="${1:-help}"; shift 2>/dev/null || true
+    case "$subcmd" in
+      start)
+        bots="${1:-}"; problem="${2:-}"; type_="${3:-architectural}"; stakes="${4:-medium}"
+        if [[ -z "$bots" || -z "$problem" ]]; then
+          echo "Usage: mb consensus start <bot1,bot2,...> <problem> [type] [stakes]"
+          echo "  bots:    comma-separated, 2-4 bots (e.g. quatumtrading-claude,gemini)"
+          echo "  type:    empirical | architectural (default) | preference"
+          echo "  stakes:  low | medium (default) | high"
+          exit 1
+        fi
+        python3 -c "
+import json, sys
+bots_list = sys.argv[1].split(',')
+print(json.dumps({'bots': bots_list, 'problem': sys.argv[2], 'type': sys.argv[3], 'stakes': sys.argv[4]}))
+" "$bots" "$problem" "$type_" "$stakes" | \
+        curl -s -X POST "$METABOT_URL/api/consensus" \
+          -H "$METABOT_AUTH" -H "Content-Type: application/json" \
+          -d @- | _json
+        ;;
+      get|status|s)
+        tid="${1:-}"
+        if [[ -z "$tid" ]]; then
+          echo "Usage: mb consensus get <taskId>"
+          exit 1
+        fi
+        curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/consensus/$tid" | _json
+        ;;
+      *)
+        echo "Usage:"
+        echo "  mb consensus start <bot1,bot2,...> <problem> [type] [stakes]"
+        echo "  mb consensus get <taskId>"
+        exit 1
+        ;;
+    esac
+    ;;
   # --- Task delegation (deprecated alias for talk) ---
   task)
     bot="$1" chat="$2"; shift 2 2>/dev/null || true
