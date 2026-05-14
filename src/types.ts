@@ -47,6 +47,13 @@ export interface CardState {
   sessionCostUsd?: number;
   /** Background tasks (e.g. Monitor) the agent has spawned during this turn. */
   backgroundEvents?: BackgroundEvent[];
+  /** Gemini-specific quota info from Google Code Assist's retrieveUserQuota.
+   *  Other engines won't set this. When present, card footer shows
+   *  `quota: X% used (还有 Yh reset)` instead of `$cost`. */
+  quotaInfo?: {
+    usedPct: number;
+    hoursToReset: number;
+  };
 }
 
 export interface IncomingMessage {

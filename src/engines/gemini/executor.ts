@@ -14,6 +14,7 @@ import {
   translateGeminiJsonEvent,
   type GeminiJsonEvent,
 } from './jsonl-translator.js';
+import { fetchGeminiQuota } from './quota-fetcher.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -332,7 +333,32 @@ export class GeminiExecutor {
           });
           return;
         }
-        resolve({ kind: 'completed', messages: pending });
+        // Successful completion — fetch quota and attach quotaInfo to the
+        // result SDKMessage. Bridge stream-processor reads quotaInfo and
+        // surfaces it in the card footer (replacing the $-cost slot, since
+        // Gemini AI Pro is flat-tier and $cost is always 0). Non-blocking.
+        void (async () => {
+          try {
+            const buckets = await fetchGeminiQuota();
+            const resultMsg = pending.find((m) => m.type === 'result' && !m.is_error);
+            if (resultMsg && buckets && state.model) {
+              const bucket = buckets.find((b) => b.modelId === state.model);
+              if (bucket && typeof bucket.remainingFraction === 'number') {
+                const usedPct = (1 - bucket.remainingFraction) * 100;
+                const hoursToReset = bucket.resetTime
+                  ? Math.max(0, (new Date(bucket.resetTime).getTime() - Date.now()) / 3_600_000)
+                  : 0;
+                resultMsg.quotaInfo = {
+                  usedPct: Math.round(usedPct * 10) / 10,
+                  hoursToReset: Math.round(hoursToReset * 10) / 10,
+                };
+              }
+            }
+          } catch (err: any) {
+            this.logger.warn({ err: err?.message }, 'Gemini quota fetch failed (non-fatal, footer will omit quota)');
+          }
+          resolve({ kind: 'completed', messages: pending });
+        })();
       });
     });
   }

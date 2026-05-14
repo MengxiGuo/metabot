@@ -189,7 +189,7 @@ export class ConsensusOrchestrator {
       `✓ Phase 1 complete (${completed}/${total} bots)`,
       completed < 2
         ? '⚠️ <2 bots completed — cannot continue, will fail consensus'
-        : 'Day 1 stops here. Phase 2-5 implementation pending.',
+        : 'Advancing to Phase 2: Cross-Critique...',
       completed < 2 ? 'orange' : 'turquoise',
     );
   }

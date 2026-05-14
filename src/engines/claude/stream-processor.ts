@@ -36,6 +36,7 @@ export class StreamProcessor {
   private _model: string | undefined;
   private _totalTokens: number | undefined;
   private _contextWindow: number | undefined;
+  private _quotaInfo: { usedPct: number; hoursToReset: number } | undefined;
   // Track per-API-call usage from stream events for accurate context window display
   private _lastInputTokens: number | undefined;
   private _lastOutputTokens: number | undefined;
@@ -238,6 +239,7 @@ export class StreamProcessor {
   private processResultMessage(message: SDKMessage): CardState {
     this.costUsd = message.total_cost_usd;
     this.durationMs = message.duration_ms;
+    if (message.quotaInfo) this._quotaInfo = message.quotaInfo;
 
     // Extract model usage info (per-model breakdown from SDK)
     if (message.modelUsage) {
@@ -288,6 +290,7 @@ export class StreamProcessor {
       model: this._model,
       totalTokens: this._totalTokens,
       contextWindow: this._contextWindow,
+      quotaInfo: this._quotaInfo,
       backgroundEvents: this._backgroundEvents.size > 0
         ? [...this._backgroundEvents.values()]
         : undefined,
