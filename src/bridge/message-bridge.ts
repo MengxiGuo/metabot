@@ -694,7 +694,20 @@ export class MessageBridge {
       return;
     }
 
-    const apiContext = { botName: this.config.name, chatId };
+    // If the bot's config declares peer bots for this chatId via
+    // `feishuGroups`, populate groupMembers + groupId so the engine's system
+    // prompt teaches the bot how to reach them via `mb talk`. Without this,
+    // the bot treats every Feishu message as solo even if other bots are in
+    // the same group.
+    const peerBots = this.config.feishuGroups?.[chatId];
+    const apiContext = peerBots && peerBots.length > 0
+      ? {
+          botName: this.config.name,
+          chatId,
+          groupMembers: [this.config.name, ...peerBots.filter((p) => p !== this.config.name)],
+          groupId: chatId,
+        }
+      : { botName: this.config.name, chatId };
 
     // Start multi-turn execution
     const executionHandle = this.executorForChat(chatId).startExecution({

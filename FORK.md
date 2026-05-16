@@ -41,16 +41,32 @@ Config a bot for Gemini in `bots.json`:
 
 ### 2. Inter-bot multi-agent collaboration framework
 
-Two bots running under the same metabot can now talk to each other in a
-group chat with both sides visible to the user:
+Two bots running under the same metabot can talk to each other in a
+group chat with both sides visible to the user. Once you've declared the
+group in `bots.json` (see [§ Setup Step 2](#step-2-configure-botsjson)
+below), any bot in the group just runs:
 
 ```bash
-MB_CALLER_BOT=quatumtrading-claude  mb talk gemini  <chatId>  "<prompt>"
+mb talk <peerBot>  grouptalk-<chatId>-<peerBot>  "<prompt>"
 ```
 
-The `MB_CALLER_BOT` env var triggers metabot to post the outgoing prompt as
-a visible card from the caller's identity before invoking the target — so
-the whole inter-bot dialogue is observable in the real Feishu group.
+…and metabot automatically posts the outgoing prompt as a visible card
+from the caller's identity before invoking the target — so the whole
+inter-bot dialogue is observable in the real Feishu group.
+
+**No env-var prefix needed:** each engine wrapper (Claude / Gemini / Codex)
+auto-injects `MB_CALLER_BOT=<this bot's name>` into the agent subprocess'
+environment, so `mb talk` always knows who the caller is. (Earlier versions
+of this fork required users to manually export `MB_CALLER_BOT=...` before
+every `mb talk` call — that step is no longer necessary.)
+
+**Group membership is config-driven:** the `feishuGroups` field in each
+bot's `bots.json` entry tells the bridge which chatIds are shared with
+which peer bots. When a bot receives a message in a declared group chat,
+its system prompt is auto-augmented with a `## Group Chat` block listing
+peer bot names and the `grouptalk-<chatId>-<peer>` chatId pattern — so the
+agent knows how to reach peers without you having to teach it via a skill
+on every machine.
 
 When inter-bot calls are detected (caller bot != target bot, real `oc_...`
 chatId), metabot auto-injects a **critical-evaluation framing prefix** into
@@ -144,8 +160,54 @@ you want to use Claude Code.
 
 If you want to use the inter-bot framework or consensus protocol, you need
 at least **2 bots in the same Feishu group chat** (e.g. one Claude bot
-named `my-claude` and one Gemini bot named `my-gemini`), and you must
-**manually invite both bot apps to the group** in Feishu.
+named `my-claude` and one Gemini bot named `my-gemini`), and you must:
+
+1. **Invite both bot apps to the group in Feishu** (open the group → ⋯ →
+   "Add members" → pick each bot app).
+2. **Note the group's chatId** (`oc_xxxxxxxxxxxxxxxxxxxxxx`). The fastest
+   way to obtain it: send any message to the group and grep metabot's log
+   for the line `Incoming message ... chatId: oc_...` — the chatId is
+   right there. (Alternative: send a message that triggers a card reply;
+   the chatId is also visible in the API request body that gets logged.)
+3. **Declare the group in each bot's `bots.json` entry** via the
+   `feishuGroups` field. Example for a 2-bot group containing `my-claude`
+   and `my-gemini`:
+
+   ```jsonc
+   {
+     "feishuBots": [
+       {
+         "name": "my-claude",
+         "feishuAppId": "cli_xxx",
+         "feishuAppSecret": "...",
+         "defaultWorkingDirectory": "/home/user/projects/foo",
+         "feishuGroups": {
+           "oc_xxxxxxxxxxxxxxxxxxxxxx": ["my-gemini"]
+         }
+       },
+       {
+         "name": "my-gemini",
+         "engine": "gemini",
+         "feishuAppId": "cli_yyy",
+         "feishuAppSecret": "...",
+         "defaultWorkingDirectory": "/home/user/projects/foo",
+         "gemini": { "model": "gemini-3.1-pro-preview", "approvalMode": "yolo" },
+         "feishuGroups": {
+           "oc_xxxxxxxxxxxxxxxxxxxxxx": ["my-claude"]
+         }
+       }
+     ]
+   }
+   ```
+
+   The `feishuGroups` map is per-bot, listing only the **peer** names (this
+   bot itself is auto-filtered out). With this in place, when a user @s
+   `my-claude` in that group, Claude's system prompt automatically grows a
+   `## Group Chat` block that teaches it to reach `my-gemini` via
+   `mb talk my-gemini grouptalk-oc_xxxxxxxxxxxxxxxxxxxxxx-my-gemini "..."`.
+
+   Skip this field entirely if your bot is solo in every chat — the bridge
+   degrades gracefully (no group hint injected, no inter-bot routing).
 
 ### Step 3: Start
 
@@ -212,6 +274,18 @@ CODE_ASSIST_ENDPOINT      Defaults to https://cloudcode-pa.googleapis.com.
 - **Inter-bot critical-eval framing is opinionated.** It forces target bots
   into adversarial-review mode by default. Some lightweight tasks would
   prefer just a delegation — there is no opt-out flag yet.
+- **Kimi engine doesn't auto-set `MB_CALLER_BOT`.** The Kimi executor
+  spawns its CLI through the Moonshot SDK rather than a direct
+  `child_process.spawn`, so the env-injection point used by Claude / Gemini
+  / Codex doesn't apply. Kimi bots can still call `mb talk`, but the
+  outgoing prompt won't render as a caller card in the group (the dialogue
+  looks one-sided). Workaround: prefix the command manually, e.g.
+  `MB_CALLER_BOT=<thisBot> mb talk <peer> ...`.
+- **`feishuGroups` is static config.** There is no auto-discovery from
+  Feishu chat membership — if you add a new bot to the group later, you
+  must update `bots.json` and reload. (Auto-discovery would require
+  mapping Feishu open_id back to metabot bot config, which we punted on
+  for v1.)
 
 ---
 

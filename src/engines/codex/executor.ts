@@ -129,7 +129,13 @@ export class CodexExecutor {
     try {
       child = spawn(codexConfig.executable || CODEX_EXECUTABLE, args, {
         cwd,
-        env: { ...process.env, ...(codexConfig.env ?? {}) },
+        env: {
+          ...process.env,
+          // Tag outgoing `mb talk` calls with this bot's identity so the
+          // bridge can post the prompt as a visible card from this bot.
+          MB_CALLER_BOT: this.config.name,
+          ...(codexConfig.env ?? {}),
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (err: any) {
@@ -215,11 +221,17 @@ export class CodexExecutor {
         `## MetaBot API\nYou are running as bot "${apiContext.botName}" in chat "${apiContext.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`,
       );
 
+      // See claude/executor.ts for the two-mode rationale.
       if (apiContext.groupMembers && apiContext.groupMembers.length > 0) {
         const others = apiContext.groupMembers.filter((m) => m !== apiContext.botName);
-        if (apiContext.groupId) {
+        const groupId = apiContext.groupId;
+        if (groupId && groupId !== apiContext.chatId) {
           sections.push(
-            `## Group Chat\nYou are in a group chat (group: ${apiContext.groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${apiContext.groupId}-<botName> "message"\``,
+            `## Group Chat\nYou are in a group chat (group: ${groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${groupId}-<botName> "message"\``,
+          );
+        } else if (others.length > 0) {
+          sections.push(
+            `## Group Chat\nYou are in a Feishu group chat (chat: ${apiContext.chatId}) with these other bots: ${others.join(', ')}.\nTo talk to one of them with both your prompt and their reply visible in this group, use: \`mb talk <peerBot> ${apiContext.chatId} "<message>"\`\nIMPORTANT: Use the real chat id (${apiContext.chatId}), NOT a grouptalk- prefix.`,
           );
         }
       }

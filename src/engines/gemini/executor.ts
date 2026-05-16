@@ -287,6 +287,9 @@ export class GeminiExecutor {
             ...process.env,
             NO_BROWSER: '1',
             GEMINI_CLI_TRUST_WORKSPACE: 'true',
+            // Tag outgoing `mb talk` calls with this bot's identity so the
+            // bridge can post the prompt as a visible card from this bot.
+            MB_CALLER_BOT: this.config.name,
             ...(geminiConfig.env ?? {}),
           },
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -342,7 +345,36 @@ export class GeminiExecutor {
             const buckets = await fetchGeminiQuota();
             const resultMsg = pending.find((m) => m.type === 'result' && !m.is_error);
             if (resultMsg && buckets && state.model) {
-              const bucket = buckets.find((b) => b.modelId === state.model);
+              // Match strategy: exact modelId first; fall back to substring
+              // both ways (gemini-cli versions sometimes report a normalized
+              // id like 'gemini-3-pro' while the quota API returns the full
+              // 'gemini-3.1-pro-preview', or vice versa).
+              let bucket = buckets.find((b) => b.modelId === state.model);
+              let matchKind: 'exact' | 'substring' | 'none' = bucket ? 'exact' : 'none';
+              if (!bucket) {
+                bucket = buckets.find(
+                  (b) =>
+                    typeof b.modelId === 'string' &&
+                    (b.modelId.includes(state.model!) || state.model!.includes(b.modelId)),
+                );
+                if (bucket) matchKind = 'substring';
+              }
+              if (!bucket) {
+                // Surface this so users debugging a missing footer can see
+                // exactly why the match failed (no buckets vs. id mismatch).
+                this.logger.warn(
+                  {
+                    stateModel: state.model,
+                    bucketModels: buckets.map((b) => b.modelId),
+                  },
+                  'Gemini quota: no bucket matched state.model — footer will omit quota',
+                );
+              } else {
+                this.logger.debug(
+                  { stateModel: state.model, matchedBucket: bucket.modelId, matchKind },
+                  'Gemini quota match',
+                );
+              }
               if (bucket && typeof bucket.remainingFraction === 'number') {
                 const usedPct = (1 - bucket.remainingFraction) * 100;
                 const hoursToReset = bucket.resetTime
@@ -399,11 +431,18 @@ export class GeminiExecutor {
         `## MetaBot API\nYou are running as bot "${apiContext.botName}" in chat "${apiContext.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`,
       );
 
+      // See claude/executor.ts for the two-mode rationale (web UI grouptalk
+      // namespace vs Feishu real-chatId).
       if (apiContext.groupMembers && apiContext.groupMembers.length > 0) {
         const others = apiContext.groupMembers.filter((m) => m !== apiContext.botName);
-        if (apiContext.groupId) {
+        const groupId = apiContext.groupId;
+        if (groupId && groupId !== apiContext.chatId) {
           sections.push(
-            `## Group Chat\nYou are in a group chat (group: ${apiContext.groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${apiContext.groupId}-<botName> "message"\``,
+            `## Group Chat\nYou are in a group chat (group: ${groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${groupId}-<botName> "message"\``,
+          );
+        } else if (others.length > 0) {
+          sections.push(
+            `## Group Chat\nYou are in a Feishu group chat (chat: ${apiContext.chatId}) with these other bots: ${others.join(', ')}.\nTo talk to one of them with both your prompt and their reply visible in this group, use: \`mb talk <peerBot> ${apiContext.chatId} "<message>"\`\nIMPORTANT: Use the real chat id (${apiContext.chatId}), NOT a grouptalk- prefix.`,
           );
         }
       }
