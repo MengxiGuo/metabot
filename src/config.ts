@@ -42,6 +42,16 @@ export interface BotConfigBase {
   codex?: CodexBotConfig;
   /** Gemini-specific overrides. Populated only when engine === 'gemini'. */
   gemini?: GeminiBotConfig;
+  /**
+   * Optional map: Feishu chatId → list of peer bot names that also live in
+   * that chat. When set, MessageBridge.handleMessage fills apiContext with
+   * groupMembers + groupId (= chatId) so the engine's system prompt includes
+   * the "## Group Chat" hint teaching the bot to use
+   * `mb talk <peer> grouptalk-<chatId>-<peer> "..."` for visible inter-bot
+   * dialogue. Without this map, the bot operates as a solo bot even if
+   * other bots happen to be in the same Feishu chat.
+   */
+  feishuGroups?: Record<string, string[]>;
 }
 
 /** Gemini-specific overrides. Populated only when engine === 'gemini'. */
@@ -214,6 +224,19 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   downloadsDir?: string;
   /** When true, respond to all messages in group chats without requiring @mention. */
   groupNoMention?: boolean;
+  /**
+   * Optional map: Feishu chatId → list of peer bot names (this bot's name may
+   * be included or omitted; it is auto-filtered out). Declares which other
+   * metabot-managed bots also live in that chat so the engine's system prompt
+   * can teach the bot how to reach them via `mb talk`.
+   *
+   * Example:
+   *   "feishuGroups": {
+   *     "oc_d1e2d41e0427d84d2aa3b7f3cf81509f": ["gemini"],
+   *     "oc_a9b393cd795f4dd7de3f0cf0b5193335": ["gemini", "codex-helper"]
+   *   }
+   */
+  feishuGroups?: Record<string, string[]>;
 }
 
 function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
@@ -232,6 +255,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(entry.feishuGroups ? { feishuGroups: entry.feishuGroups } : {}),
     feishu: {
       appId: entry.feishuAppId,
       appSecret: entry.feishuAppSecret,

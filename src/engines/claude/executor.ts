@@ -59,7 +59,7 @@ function hasCredentialsFile(): boolean {
  * - Merges process.env so child inherits system PATH, TEMP, etc.
  * - Optionally injects an explicit ANTHROPIC_API_KEY from bots.json config.
  */
-function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => SpawnedProcess {
+function createSpawnFn(explicitApiKey?: string, botName?: string): (options: SpawnOptions) => SpawnedProcess {
   // Decide once whether to filter auth env vars
   const filterAuthVars = !!(explicitApiKey || hasCredentialsFile());
 
@@ -96,6 +96,13 @@ function createSpawnFn(explicitApiKey?: string): (options: SpawnOptions) => Spaw
     // Inject explicit API key from bots.json (after filtering, so it takes effect)
     if (explicitApiKey) {
       env.ANTHROPIC_API_KEY = explicitApiKey;
+    }
+
+    // Tag outgoing `mb talk` calls with this bot's identity so the bridge
+    // can post the prompt as a visible card from this bot (otherwise the
+    // dialogue looks one-sided in the group chat).
+    if (botName) {
+      env.MB_CALLER_BOT = botName;
     }
 
     const child = spawn(nodePath, options.args, {
@@ -208,7 +215,7 @@ export class ClaudeExecutor {
       // Cross-platform spawn: custom spawn filters CLAUDE* env vars and uses
       // process.execPath to avoid PATH issues on Windows; fileURLToPath converts
       // file:// URLs to native paths for the SDK CLI entrypoint.
-      spawnClaudeCodeProcess: createSpawnFn(this.config.claude.apiKey),
+      spawnClaudeCodeProcess: createSpawnFn(this.config.claude.apiKey, this.config.name),
       executableArgs: [path.join(path.dirname(fileURLToPath(import.meta.resolve('@anthropic-ai/claude-agent-sdk'))), 'cli.js')],
       pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE,
     };
@@ -228,17 +235,24 @@ export class ClaudeExecutor {
         `## MetaBot API\nYou are running as bot "${apiContext.botName}" in chat "${apiContext.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`
       );
 
-      // Group chat — tell the bot who else is in the group and how to talk to them
+      // Group chat — tell the bot who else is in the group and how to talk to them.
+      // Two modes:
+      //   - Web UI group:    groupId is a separate routing namespace (UUID), so peers
+      //                      are reached via the `grouptalk-<groupId>-<botName>` chatId
+      //                      pattern (the WS subscriber routes those back to the UI).
+      //   - Feishu IM group: groupId === chatId (the real `oc_...` Feishu chat). Peers
+      //                      are reached via the SAME chatId — the bridge auto-posts a
+      //                      visible "caller" card before invoking the peer.
       if (apiContext.groupMembers && apiContext.groupMembers.length > 0) {
         const others = apiContext.groupMembers.filter((m) => m !== apiContext.botName);
         const groupId = apiContext.groupId;
-        if (groupId) {
+        if (groupId && groupId !== apiContext.chatId) {
           appendSections.push(
             `## Group Chat\nYou are in a group chat (group: ${groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${groupId}-<botName> "message"\`\nExample: \`mb talk ${others[0]} grouptalk-${groupId}-${others[0]} "hello"\`\nIMPORTANT: Always use the grouptalk-${groupId}-<botName> chatId pattern when talking to other bots in this group.`
           );
-        } else {
+        } else if (others.length > 0) {
           appendSections.push(
-            `## Group Chat\nYou are in a group chat with these bots: ${others.join(', ')}.\nUse \`mb talk <botName> <chatId> "message"\` to communicate with other bots in the group.`
+            `## Group Chat\nYou are in a Feishu group chat (chat: ${apiContext.chatId}) with these other bots: ${others.join(', ')}.\nTo talk to one of them with both your prompt and their reply visible in this group, use: \`mb talk <peerBot> ${apiContext.chatId} "<message>"\`\nExample: \`mb talk ${others[0]} ${apiContext.chatId} "hello — what do you think about X?"\`\nIMPORTANT: Use the real chat id (${apiContext.chatId}), NOT a grouptalk- prefix — the latter is for the web UI only and would suppress the caller card.`
           );
         }
       }

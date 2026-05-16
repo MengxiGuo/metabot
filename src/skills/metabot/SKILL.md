@@ -65,6 +65,46 @@ Use qualified names to target a specific peer: `mb talk <peerName>/<botName> <ch
 
 Use `mb bots` to see all available bots including those on peer instances (they will have `peerName` and `peerUrl` fields indicating which instance hosts them).
 
+### Visible Inter-Bot Dialogue in a Group Chat
+
+If your system prompt has a `## Group Chat` block, you are in a group with other bots. **Follow the exact `mb talk` invocation shown in that block** — it differs by platform:
+
+- **Feishu IM group** (the block says `chat: oc_...`): use the real Feishu chatId directly. Bridge auto-posts your outgoing prompt as a visible caller card, then invokes the peer; peer's reply also lands in the same Feishu chat.
+  ```bash
+  mb talk <peerBot> <thisChatId> "<your message>"      # use the oc_... chatId from the block
+  ```
+
+- **Web UI group** (the block says `group: <uuid>` distinct from the chat id): use the `grouptalk-<groupId>-<peerBot>` routing namespace so the web UI subscriber renders peer cards in the right pane.
+  ```bash
+  mb talk <peerBot> grouptalk-<groupId>-<peerBot> "<your message>"
+  ```
+
+Your bot identity (`MB_CALLER_BOT`) is auto-set by the metabot engine wrapper for Claude / Gemini / Codex bots, so you do not need to prefix the command with `MB_CALLER_BOT=...`. (Kimi engine bots still need the manual prefix — see FORK.md known limitations.)
+
+### N-Bot Consensus Protocol
+
+For multi-bot reasoned discussion with explicit falsification rounds and a Delta Mandate sign-off (use when stakes are non-trivial and 1-shot `mb talk` rubber-stamping is a risk):
+
+```bash
+# Start an async consensus task (typical runtime 5-15 min)
+mb consensus start <bot1,bot2[,bot3,bot4]> "<problem>" <type> <stakes> [chatId] [callerBot]
+#   type:   empirical | architectural (default) | preference
+#   stakes: low | medium (default) | high
+#   chatId + callerBot: optional. If both set, every phase event renders as
+#                       a card in <chatId> under <callerBot>'s identity, so
+#                       the user can watch the bots stress-test each other.
+
+# Poll status
+mb consensus get <taskId>
+
+# List running tasks
+mb consensus list
+```
+
+The protocol runs 5 phases: Independent Take → Cross-Critique → Falsification → Synthesis + Adversarial Verifier → Final Dissent. Output is structured (`agreedPoints`, `standingDissents`, `riskTags`, `empiricalQuestions`, `pureDifferences`) — not a free-form essay.
+
+Use cases: architectural decisions where you and a peer disagree; high-stakes plans where you want a falsification stress-test before acting; situations where you want a clear list of preserved-vs-dropped points instead of "we agreed". Skip for trivial questions — 1-shot `mb talk` is faster.
+
 ### API Reference (for complex operations)
 
 For operations not covered by `mb` (creating bots, updating tasks, sendCards option), use the API directly.
