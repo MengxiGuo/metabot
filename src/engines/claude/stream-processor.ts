@@ -405,6 +405,24 @@ export class StreamProcessor {
   getPlanFilePath(): string | null {
     return this._planFilePath;
   }
+
+  /**
+   * True if any SDK-tracked background task (Monitor, Bash run_in_background, etc.)
+   * is still running when the turn ends. Used by the bridge to decide whether to
+   * schedule an auto-drain phantom turn so queued task_notification events get
+   * delivered without requiring the user to ping.
+   */
+  hasRunningBackgroundTasks(): boolean {
+    for (const ev of this._backgroundEvents.values()) {
+      if (ev.status === 'running') return true;
+    }
+    return false;
+  }
+
+  /** Snapshot of currently-running background tasks (used for drain logs). */
+  getRunningBackgroundTasks(): BackgroundEvent[] {
+    return [...this._backgroundEvents.values()].filter((ev) => ev.status === 'running');
+  }
 }
 
 function isImagePath(filePath: string): boolean {

@@ -8,6 +8,7 @@ import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai
 import type { BotConfigBase } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
+import { ModelFallbackManager } from './model-fallback.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -198,10 +199,14 @@ export interface ExecutionHandle {
 }
 
 export class ClaudeExecutor {
+  private readonly fallback: ModelFallbackManager;
+
   constructor(
     private config: BotConfigBase,
     private logger: Logger,
-  ) {}
+  ) {
+    this.fallback = new ModelFallbackManager(config.name, logger);
+  }
 
   private buildQueryOptions(cwd: string, sessionId: string | undefined, abortController: AbortController, outputsDir?: string, apiContext?: ApiContext): Record<string, unknown> {
     const queryOptions: Record<string, unknown> = {
@@ -312,7 +317,14 @@ export class ClaudeExecutor {
     }
 
     if (this.config.claude.model) {
-      queryOptions.model = this.config.claude.model;
+      const resolved = this.fallback.resolveModel(this.config.claude.model);
+      queryOptions.model = resolved;
+      if (resolved !== this.config.claude.model) {
+        this.logger.info(
+          { configured: this.config.claude.model, using: resolved },
+          'Model fallback active — routing to fallback model',
+        );
+      }
     }
 
     if (sessionId) {
@@ -415,6 +427,13 @@ export class ClaudeExecutor {
     });
 
     const logger = this.logger;
+    const fallback = this.fallback;
+    const activeModel = (queryOptions.model as string | undefined) ?? this.config.claude.model;
+    const configuredModel = this.config.claude.model;
+    const wasProbing = !!configuredModel
+      && configuredModel.includes('opus')
+      && activeModel === configuredModel
+      && fallback.snapshot().degraded;
 
     async function* wrapStream(): AsyncGenerator<SDKMessage> {
       // Race each stream.next() against the abort signal so we exit immediately on /stop
@@ -429,6 +448,7 @@ export class ClaudeExecutor {
       });
 
       const iterator = stream[Symbol.asyncIterator]();
+      let sawSuccessfulResult = false;
 
       try {
         while (true) {
@@ -437,14 +457,59 @@ export class ClaudeExecutor {
             abortPromise,
           ]);
           if (result.done) break;
-          yield result.value as SDKMessage;
+          const msg = result.value as SDKMessage;
+          if (msg.type === 'result' && msg.is_error !== true) {
+            sawSuccessfulResult = true;
+          }
+          yield msg;
+        }
+        // Stream finished cleanly with a non-error result on the primary → recovery confirmed.
+        if (sawSuccessfulResult && wasProbing) {
+          fallback.markRecovered();
         }
       } catch (err: any) {
         if (err.name === 'AbortError' || abortController.signal.aborted) {
           logger.info('Claude execution aborted');
-          // Clean up the underlying iterator (non-blocking)
           try { iterator.return?.(undefined); } catch { /* ignore */ }
           return;
+        }
+        const { isQuota } = fallback.classifyError(err);
+        const errText = err?.message ?? String(err);
+        if (isQuota && activeModel) {
+          const isOpus = activeModel.includes('opus');
+          const isSonnet = activeModel.includes('sonnet');
+          if (isOpus) {
+            // Primary quota hit — degrade so the next user message auto-uses Sonnet.
+            if (wasProbing) {
+              fallback.delayNextProbe(errText);
+            } else {
+              fallback.markPrimaryExhausted(activeModel, errText);
+            }
+            logger.warn({ activeModel, errText }, 'Opus quota exhausted — emitting fallback notice');
+            yield {
+              type: 'assistant',
+              message: {
+                content: [{
+                  type: 'text',
+                  text: '⚠️ Opus 周配额已用尽，已自动切换到 Sonnet。请重新发送上一条消息（之后约 6 小时内默认走 Sonnet，到时会再尝试 Opus；若已恢复将自动切回）。',
+                }],
+              },
+            } as SDKMessage;
+            return;
+          }
+          if (isSonnet) {
+            logger.warn({ activeModel, errText }, 'Sonnet quota also exhausted');
+            yield {
+              type: 'assistant',
+              message: {
+                content: [{
+                  type: 'text',
+                  text: '⚠️ Opus 与 Sonnet 配额均已用尽。请等到周二 1:00 AM 配额重置后再试。',
+                }],
+              },
+            } as SDKMessage;
+            return;
+          }
         }
         throw err;
       }

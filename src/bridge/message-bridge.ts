@@ -18,6 +18,7 @@ import { OutputHandler } from './output-handler.js';
 import { CostTracker } from '../utils/cost-tracker.js';
 import { metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
+import { buildIncrementalContext } from '../feishu/group-context.js';
 
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes for user to answer
@@ -71,6 +72,33 @@ interface RunningTask {
   rateLimiter: RateLimiter;
   chatId: string;
 }
+
+/**
+ * Scheduled phantom turn that fires after a turn ended with SDK-tracked
+ * background tasks (Monitor, Bash run_in_background) still running.
+ *
+ * The SDK queues `task_notification` events between turns and only flushes
+ * them at the start of the *next* user-triggered turn. That means a long
+ * background task can complete silently — the bot promises "Monitor will
+ * notify" but no notification ever reaches Feishu because the user never
+ * pings again. This struct tracks the timer the bridge installs to wake
+ * the LLM with a synthetic turn so queued notifications get delivered.
+ */
+interface DrainState {
+  timerId: ReturnType<typeof setTimeout>;
+  attemptsRemaining: number;
+  nextDelayMs: number;
+  taskCount: number;
+}
+
+/** Hard cap on a single drain delay (parsed promise can't push past this). */
+const DRAIN_DELAY_MAX_MS = 30 * 60 * 1000;
+/** Default delay when the bot didn't give a "wait N min" hint. */
+const DRAIN_DELAY_DEFAULT_MS = 5 * 60 * 1000;
+/** Number of follow-up retries after the first attempt finds nothing. */
+const DRAIN_RETRY_ATTEMPTS = 2;
+/** Sentinel the drain prompt asks the LLM to emit when no events arrived. */
+const DRAIN_NO_UPDATE_SENTINEL = '__NO_UPDATE__';
 
 export interface ApiTaskOptions {
   prompt: string;
@@ -132,6 +160,7 @@ export class MessageBridge {
   private runningTasks = new Map<string, RunningTask>(); // keyed by chatId
   private messageQueues = new Map<string, IncomingMessage[]>(); // per-chatId message queue
   private pendingBatches = new Map<string, PendingBatch>(); // media debounce batches
+  private pendingDrains = new Map<string, DrainState>(); // background-task drain timers, keyed by chatId
   /** Callback for activity lifecycle events (task started/completed/failed). */
   onActivityEvent?: (event: ActivityEventData) => void;
 
@@ -295,6 +324,12 @@ export class MessageBridge {
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
     const { chatId, text } = msg;
+
+    // The user just messaged — invalidate any pending background-task drain.
+    // (If a drain is currently mid-execution, the runningTasks check inside
+    // executeBackgroundDrain has already gated it; cancelling here only kills
+    // the timer for drains that haven't fired yet.)
+    this.cancelBackgroundDrain(chatId);
 
     // Handle commands (always allowed, even during pending questions)
     if (text.startsWith('/')) {
@@ -709,6 +744,12 @@ export class MessageBridge {
         }
       : { botName: this.config.name, chatId };
 
+    // Prepend incremental group history (other members' messages since this bot
+    // last spoke). Empty string when no increment exists (same bot continuing
+    // its own conversation) — zero token overhead in the common case.
+    const groupCtx = buildIncrementalContext(chatId, this.config.name, this.logger);
+    if (groupCtx) prompt = groupCtx + '\n' + prompt;
+
     // Start multi-turn execution
     const executionHandle = this.executorForChat(chatId).startExecution({
       prompt,
@@ -961,6 +1002,11 @@ export class MessageBridge {
 
       // Send any output files produced by Claude
       await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+
+      // If background tasks are still tracked as running by the SDK, schedule
+      // a phantom turn so queued task_notification events get delivered without
+      // requiring the user to ping. See DrainState docstring above.
+      this.scheduleBackgroundDrain(chatId, processor, lastState.responseText || '');
     } catch (err: any) {
       this.logger.error({ err, chatId, userId }, 'Claude execution error');
 
@@ -1013,6 +1059,7 @@ export class MessageBridge {
           this.recordSession(chatId, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
           await this.sendCompletionNotice(chatId, lastState, durationMs);
           await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+          this.scheduleBackgroundDrain(chatId, processor, lastState.responseText || '');
           return; // skip the normal error handling below
         } catch (retryErr: any) {
           this.logger.error({ err: retryErr, chatId }, 'Retry after stale session also failed');
@@ -1498,6 +1545,156 @@ export class MessageBridge {
     }
   }
 
+  /**
+   * Cancel any pending background-task drain timer for this chat. Called as
+   * soon as the user sends a new message (handleMessage) so a drain doesn't
+   * race a real user turn, and from destroy() during shutdown.
+   */
+  private cancelBackgroundDrain(chatId: string): void {
+    const drain = this.pendingDrains.get(chatId);
+    if (!drain) return;
+    clearTimeout(drain.timerId);
+    this.pendingDrains.delete(chatId);
+    this.logger.info({ chatId, taskCount: drain.taskCount }, 'Cancelled pending background-task drain');
+  }
+
+  /**
+   * If the just-finished turn left SDK-tracked background tasks running,
+   * arm a timer to fire a phantom turn that flushes the SDK's queued
+   * task_notification events. If the bot said something like "wait 5 min"
+   * we honour that as the timer length (capped at 30 min); otherwise use
+   * the default. No-op if no tasks are running.
+   */
+  private scheduleBackgroundDrain(chatId: string, processor: StreamProcessor, responseText: string): void {
+    if (!processor.hasRunningBackgroundTasks()) return;
+    // Defensively clear any prior drain so we don't double-schedule.
+    this.cancelBackgroundDrain(chatId);
+
+    const tasks = processor.getRunningBackgroundTasks();
+    const promisedMs = this.parsePromisedDelay(responseText);
+    const delayMs = promisedMs ?? DRAIN_DELAY_DEFAULT_MS;
+
+    const drain: DrainState = {
+      timerId: setTimeout(() => {
+        this.executeBackgroundDrain(chatId).catch((err) => {
+          this.logger.warn({ err, chatId }, 'Background drain attempt threw');
+        });
+      }, delayMs),
+      attemptsRemaining: DRAIN_RETRY_ATTEMPTS,
+      nextDelayMs: Math.min(delayMs * 2, DRAIN_DELAY_MAX_MS),
+      taskCount: tasks.length,
+    };
+    this.pendingDrains.set(chatId, drain);
+    this.logger.info(
+      { chatId, taskCount: tasks.length, delayMs, fromBotHint: promisedMs !== null },
+      'Scheduled background-task drain phantom turn',
+    );
+  }
+
+  /**
+   * Parse a "wait N min(utes)" / "再等 N 分钟" hint out of the bot's last
+   * response so the drain fires close to when the bot promised to check back.
+   * Returns ms (clamped to [1, 30] minutes) or null if no hint found.
+   */
+  private parsePromisedDelay(text: string): number | null {
+    if (!text) return null;
+    // Two alternations because `\b` only fires between [a-zA-Z0-9_] and other
+    // chars — it can't anchor after Chinese tokens like "分钟". The English
+    // branch keeps `\b` to avoid matching inside identifiers ("admin").
+    const cn = text.match(/(\d+)\s*分钟/);
+    const en = text.match(/(\d+)\s*(?:minutes?|mins?)\b/i);
+    const m = cn ?? en;
+    if (!m) return null;
+    const minutes = parseInt(m[1], 10);
+    if (!Number.isFinite(minutes) || minutes <= 0) return null;
+    const capped = Math.min(Math.max(minutes, 1), 30);
+    return capped * 60 * 1000;
+  }
+
+  /**
+   * Fire the phantom turn: ask the LLM (with all tools disabled, single turn)
+   * to check the task-notification queue and either summarise what completed
+   * or emit the __NO_UPDATE__ sentinel. Sentinel → exponential-backoff
+   * reschedule until attempts run out. Real text → push to chat as a notice
+   * so Feishu mobile gets the push.
+   */
+  private async executeBackgroundDrain(chatId: string): Promise<void> {
+    const drain = this.pendingDrains.get(chatId);
+    if (!drain) return;
+    this.pendingDrains.delete(chatId);
+
+    // Skip if a real task is already running for this chat — the user is
+    // either mid-turn or has /stop'd. Either way the drain is moot.
+    if (this.runningTasks.has(chatId)) {
+      this.logger.info({ chatId }, 'Skipping background drain — chat busy with another task');
+      return;
+    }
+
+    const drainPrompt = [
+      '[METABOT-AUTO-DRAIN]',
+      'System message — the user did NOT send this. The bridge polled the SDK because your previous turn ended with background tasks still running.',
+      '',
+      'The SDK queues `task_notification` events (Monitor / Bash run_in_background completions) between turns and only delivers them at the start of the next turn — which is this one.',
+      '',
+      'Follow these rules exactly:',
+      '1. If any task_notification events with status=completed / failed / stopped just arrived in your context: write a SHORT update for the user — what task finished, the key result (or error message), and one sentence on what is next. Be terse, no preamble.',
+      `2. If tasks are still running and nothing new has completed: respond with EXACTLY the literal string \`${DRAIN_NO_UPDATE_SENTINEL}\` on its own line, nothing else.`,
+      '3. DO NOT call any tools — they are disabled for this turn.',
+      '4. DO NOT ask the user any question — they did not message you.',
+    ].join('\n');
+
+    let result: ApiTaskResult;
+    try {
+      result = await this.executeApiTask({
+        prompt: drainPrompt,
+        chatId,
+        userId: 'metabot-auto-drain',
+        sendCards: false,
+        allowedTools: [],
+        maxTurns: 1,
+      });
+    } catch (err) {
+      this.logger.warn({ err, chatId }, 'Background drain phantom turn threw — giving up');
+      return;
+    }
+
+    const text = (result.responseText || '').trim();
+    const isNoUpdate = !text || text.includes(DRAIN_NO_UPDATE_SENTINEL);
+    this.logger.info(
+      { chatId, success: result.success, hasText: !!text, isNoUpdate, attemptsRemaining: drain.attemptsRemaining },
+      'Background drain phantom turn finished',
+    );
+
+    if (!result.success) {
+      // Drain itself errored — don't retry. User can /ping if they want a recheck.
+      return;
+    }
+
+    if (isNoUpdate) {
+      if (drain.attemptsRemaining > 0) {
+        const nextDelay = Math.min(drain.nextDelayMs, DRAIN_DELAY_MAX_MS);
+        const next: DrainState = {
+          timerId: setTimeout(() => {
+            this.executeBackgroundDrain(chatId).catch((err) => {
+              this.logger.warn({ err, chatId }, 'Background drain reattempt threw');
+            });
+          }, nextDelay),
+          attemptsRemaining: drain.attemptsRemaining - 1,
+          nextDelayMs: Math.min(nextDelay * 2, DRAIN_DELAY_MAX_MS),
+          taskCount: drain.taskCount,
+        };
+        this.pendingDrains.set(chatId, next);
+      }
+      return;
+    }
+
+    try {
+      await this.sender.sendTextNotice(chatId, '🔔 Background Task Update', text, 'blue');
+    } catch (err) {
+      this.logger.warn({ err, chatId }, 'Failed to send background-drain notice to chat');
+    }
+  }
+
   private async sendCompletionNotice(chatId: string, state: CardState, durationMs: number): Promise<void> {
     // Some senders (WeChat) already send the final response as a standalone message, so skip
     if (this.sender.skipCompletionNotice) return;
@@ -1546,6 +1743,10 @@ export class MessageBridge {
       clearTimeout(batch.timerId);
     }
     this.pendingBatches.clear();
+    for (const [, drain] of this.pendingDrains) {
+      clearTimeout(drain.timerId);
+    }
+    this.pendingDrains.clear();
     for (const [chatId, task] of this.runningTasks) {
       if (task.questionTimeoutId) {
         clearTimeout(task.questionTimeoutId);

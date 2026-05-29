@@ -59,7 +59,7 @@ async function startFeishuBot(botConfig: BotConfig, logger: Logger, memoryServer
   }
 
   // Create sender and bridge (FeishuSenderAdapter wraps the Feishu-specific MessageSender)
-  const rawSender = new MessageSender(client, botLogger);
+  const rawSender = new MessageSender(client, botLogger, botConfig.name);
   const sender = new FeishuSenderAdapter(rawSender);
   const bridge = new MessageBridge(botConfig, botLogger, sender, memoryServerUrl, memorySecret);
 

@@ -90,6 +90,7 @@ export interface OutgoingArchiveRecord {
   fileKey?: string;
   msgId?: string;
   isUpdate?: boolean;  // true = updateCard (card_update), false/undef = sendCard (card_initial)
+  botName?: string;    // which bot produced this outgoing record (for group-context increment tracking)
 }
 
 export function archiveOutgoing(rec: OutgoingArchiveRecord, logger?: Logger): void {
@@ -97,6 +98,7 @@ export function archiveOutgoing(rec: OutgoingArchiveRecord, logger?: Logger): vo
   append(rec.chatId, {
     ts: nowIso(),
     dir: 'out',
+    bot_name: rec.botName,
     msg_id: rec.msgId,
     type: rec.type,
     update: rec.isUpdate ? 1 : undefined,
