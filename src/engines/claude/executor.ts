@@ -2,7 +2,6 @@ import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import type { BotConfigBase } from '../../config.js';
@@ -65,7 +64,14 @@ function createSpawnFn(explicitApiKey?: string, botName?: string): (options: Spa
   const filterAuthVars = !!(explicitApiKey || hasCredentialsFile());
 
   return (options: SpawnOptions): SpawnedProcess => {
-    const nodePath = process.execPath;
+    // SDK 0.3+ resolves options.command to the executable to run: the native
+    // claude binary when pathToClaudeCodeExecutable points at it, or node/bun
+    // when pointed at a .js entry. Honor it, but fall back to the current Node
+    // binary for a bare node/bun request to avoid Windows PATH issues.
+    const cmdBase = path.basename(options.command);
+    const cmd = (cmdBase === 'node' || cmdBase === 'bun' || cmdBase === 'node.exe' || cmdBase === 'bun.exe')
+      ? process.execPath
+      : options.command;
 
     // Merge provided env with process.env for a complete environment
     const baseEnv = options.env && Object.keys(options.env).length > 0
@@ -106,7 +112,7 @@ function createSpawnFn(explicitApiKey?: string, botName?: string): (options: Spa
       env.MB_CALLER_BOT = botName;
     }
 
-    const child = spawn(nodePath, options.args, {
+    const child = spawn(cmd, options.args, {
       cwd: options.cwd,
       env,
       signal: options.signal,
@@ -221,7 +227,8 @@ export class ClaudeExecutor {
       // process.execPath to avoid PATH issues on Windows; fileURLToPath converts
       // file:// URLs to native paths for the SDK CLI entrypoint.
       spawnClaudeCodeProcess: createSpawnFn(this.config.claude.apiKey, this.config.name),
-      executableArgs: [path.join(path.dirname(fileURLToPath(import.meta.resolve('@anthropic-ai/claude-agent-sdk'))), 'cli.js')],
+      // SDK 0.3+ no longer bundles its own cli.js; it spawns the standalone
+      // claude executable resolved below. executableArgs defaults to [].
       pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE,
     };
 
