@@ -9,6 +9,17 @@ import type {
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.tiff']);
 
+const CLAUDE_CONTEXT_WINDOW_OVERRIDES: Record<string, number> = {
+  // Claude Agent SDK may currently report 200k for Fable 5 even though the
+  // public model spec and observed Claude Code sessions support 1M context.
+  'claude-fable-5': 1_000_000,
+  'claude-mythos-5': 1_000_000,
+};
+
+function normalizeClaudeContextWindow(model: string, reportedWindow: number | undefined): number | undefined {
+  return CLAUDE_CONTEXT_WINDOW_OVERRIDES[model] ?? reportedWindow;
+}
+
 /**
  * Tools handled by the SDK in bypassPermissions mode.
  * The SDK auto-responds to these; we only detect them for side effects
@@ -251,7 +262,7 @@ export class StreamProcessor {
         );
         const mu = message.modelUsage[primaryModel];
         this._model = primaryModel;
-        this._contextWindow = mu.contextWindow;
+        this._contextWindow = normalizeClaudeContextWindow(primaryModel, mu.contextWindow);
         // Use last API call's tokens from stream events (accurate context window occupation)
         // Falls back to cumulative modelUsage input+output if stream events weren't captured
         if (this._lastInputTokens != null) {

@@ -329,7 +329,7 @@ export class CommandHandler {
     if (normalized === 'list' || normalized === 'ls') {
       const active = session.model || botDefault;
       const claudeModels = [
-        { id: 'claude-fable-5', label: 'Fable 5', note: 'Mythos-class · strongest · vision SOTA · 2x price · free on Max until 6/22' },
+        { id: 'claude-fable-5', label: 'Fable 5', note: 'Mythos-class · strongest · 1M context · 2x price · free on Max until 6/22' },
         { id: 'claude-opus-4-8', label: 'Opus 4.8', note: 'Most capable · 200k context · default' },
         { id: 'claude-opus-4-8[1m]', label: 'Opus 4.8 (1M)', note: '1M context window' },
         { id: 'claude-opus-4-7', label: 'Opus 4.7', note: '200k context' },
