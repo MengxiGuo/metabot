@@ -175,13 +175,22 @@ export function buildCard(state: CardState): string {
       // Yh reset)` when quotaInfo is present. Other engines fall back to
       // the $-cost display.
       if (state.quotaInfo) {
-        const { usedPct, hoursToReset } = state.quotaInfo;
+        const { usedPct, hoursToReset, secondary } = state.quotaInfo;
         const resetStr = hoursToReset >= 1
           ? `还有 ${hoursToReset.toFixed(1)}h reset`
           : hoursToReset > 0
             ? `还有 ${Math.round(hoursToReset * 60)}min reset`
             : '即将 reset';
-        parts.push(`quota: ${usedPct.toFixed(1)}% used (${resetStr})`);
+        if (secondary) {
+          // Codex: dual window (5h primary + weekly secondary).
+          const shortReset = (h: number): string =>
+            h >= 24 ? `${(h / 24).toFixed(1)}d` : h >= 1 ? `${h.toFixed(1)}h` : h > 0 ? `${Math.round(h * 60)}min` : '即将';
+          parts.push(
+            `quota: 5h ${usedPct.toFixed(1)}% (${shortReset(hoursToReset)}) · 周 ${secondary.usedPct.toFixed(1)}% (${shortReset(secondary.hoursToReset)})`,
+          );
+        } else {
+          parts.push(`quota: ${usedPct.toFixed(1)}% used (${resetStr})`);
+        }
       } else if (state.sessionCostUsd != null) {
         parts.push(`$${state.sessionCostUsd.toFixed(2)}`);
       }

@@ -123,6 +123,99 @@ function createSpawnFn(explicitApiKey?: string, botName?: string): (options: Spa
   };
 }
 
+export interface CompactResult {
+  status: 'compacted' | 'too_few' | 'no_session' | 'error';
+  message: string;
+}
+
+/**
+ * Trigger Claude Code's native /compact on an existing session.
+ *
+ * SDK 0.3's headless query() no longer parses the `/compact` slash command
+ * from the input stream, so we invoke the standalone claude CLI directly in
+ * print mode (`-p "/compact" --resume <sessionId>`). This reuses the exact
+ * same compaction engine as the interactive CLI — real summarization with
+ * conversation continuity preserved (verified: facts survive compaction),
+ * NOT a reset. The session id is unchanged; the compacted history continues
+ * under the same id.
+ *
+ * Auth/env handling mirrors createSpawnFn: filter CLAUDE-prefixed and auth
+ * vars to avoid nested-session errors, force bubblewrap under root.
+ */
+export function compactSession(
+  sessionId: string,
+  cwd: string,
+  logger: Logger,
+  explicitApiKey?: string,
+): Promise<CompactResult> {
+  if (!sessionId) {
+    return Promise.resolve({ status: 'no_session', message: 'No active session to compact.' });
+  }
+
+  const filterAuthVars = !!(explicitApiKey || hasCredentialsFile());
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    if (ALWAYS_FILTERED_PREFIXES.some(p => key.startsWith(p))) continue;
+    if (filterAuthVars && AUTH_ENV_VARS.some(v => key.startsWith(v))) continue;
+    env[key] = value;
+  }
+  if (process.getuid?.() === 0) env.CLAUDE_CODE_BUBBLEWRAP = '1';
+  if (explicitApiKey) env.ANTHROPIC_API_KEY = explicitApiKey;
+
+  const args = ['-p', '/compact', '--resume', sessionId, '--output-format', 'json'];
+
+  return new Promise<CompactResult>((resolve) => {
+    const child = spawn(CLAUDE_EXECUTABLE, args, {
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (d) => { stdout += d.toString(); });
+    child.stderr?.on('data', (d) => { stderr += d.toString(); });
+
+    // Safety timeout: 3 minutes (compaction summarizes the whole history)
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      logger.warn({ sessionId: sessionId.slice(0, 8) }, '/compact timed out after 3min');
+      resolve({ status: 'error', message: 'Compaction timed out after 3 minutes.' });
+    }, 3 * 60 * 1000);
+
+    child.on('error', (err) => {
+      clearTimeout(timeout);
+      logger.error({ err, sessionId: sessionId.slice(0, 8) }, '/compact spawn failed');
+      resolve({ status: 'error', message: `Failed to launch compaction: ${err.message}` });
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timeout);
+      let result = '';
+      try {
+        const parsed = JSON.parse(stdout);
+        result = (parsed.result || '').toString();
+        if (parsed.is_error) {
+          resolve({ status: 'error', message: result || 'Compaction returned an error.' });
+          return;
+        }
+      } catch {
+        logger.error({ code, stdout: stdout.slice(0, 200), stderr: stderr.slice(0, 200) }, '/compact non-JSON output');
+        resolve({ status: 'error', message: 'Compaction produced unexpected output.' });
+        return;
+      }
+      // The compaction engine returns "Not enough messages to compact." when
+      // history is too short; empty result on success.
+      if (/not enough messages/i.test(result)) {
+        resolve({ status: 'too_few', message: 'Not enough conversation history to compact yet.' });
+      } else {
+        resolve({ status: 'compacted', message: 'Conversation compacted — key context preserved.' });
+      }
+    });
+  });
+}
+
 export interface ApiContext {
   botName: string;
   chatId: string;
@@ -171,8 +264,8 @@ export type SDKMessage = {
   errors?: string[];
   // Model usage from result message (per-model breakdown)
   modelUsage?: Record<string, { inputTokens: number; outputTokens: number; contextWindow: number; costUSD: number }>;
-  /** Gemini-specific: quota status from retrieveUserQuota. Surfaces in card footer. */
-  quotaInfo?: { usedPct: number; hoursToReset: number };
+  /** Flat-tier quota status (Gemini retrieveUserQuota / Codex rate_limits). Surfaces in card footer. */
+  quotaInfo?: { usedPct: number; hoursToReset: number; secondary?: { usedPct: number; hoursToReset: number } };
   // Stream event fields
   event?: {
     type: string;

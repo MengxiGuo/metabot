@@ -8,7 +8,7 @@ import type { IncomingMessage, CardState, PendingQuestion } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
 import type { DocSync } from '../sync/doc-sync.js';
 import type { Engine, Executor, ExecutionHandle, EngineName } from '../engines/index.js';
-import { createEngine, resolveEngineName, StreamProcessor, SessionManager } from '../engines/index.js';
+import { createEngine, resolveEngineName, StreamProcessor, SessionManager, compactSession } from '../engines/index.js';
 import { RateLimiter } from './rate-limiter.js';
 import { OutputsManager } from './outputs-manager.js';
 import { MemoryClient } from '../memory/memory-client.js';
@@ -216,6 +216,51 @@ export class MessageBridge {
     return entry.executor;
   }
 
+  /**
+   * Handle /compact — trigger Claude Code's native compaction on the chat's
+   * session via the standalone CLI (SDK 0.3 query() no longer parses the slash
+   * command). Real summarization with context continuity, not a reset.
+   */
+  private async handleCompact(chatId: string): Promise<void> {
+    const session = this.sessionManager.getSession(chatId);
+    const engineName: EngineName = session.engine ?? resolveEngineName(this.config);
+
+    if (engineName !== 'claude') {
+      await this.sender.sendTextNotice(chatId, 'ℹ️ /compact 不可用', `当前引擎是 ${engineName}，/compact 仅支持 claude 引擎。`, 'blue');
+      return;
+    }
+    if (!session.sessionId) {
+      await this.sender.sendTextNotice(chatId, 'ℹ️ 无会话', '当前没有活跃会话，无需压缩。', 'blue');
+      return;
+    }
+    if (this.runningTasks.has(chatId)) {
+      await this.sender.sendTextNotice(chatId, '⏳ 任务进行中', '有任务正在运行，请先 `/stop` 或等待完成后再 /compact。', 'orange');
+      return;
+    }
+
+    await this.sender.sendTextNotice(chatId, '🔄 正在压缩会话', '调用 Claude Code 原生压缩，保留关键上下文…', 'blue');
+
+    try {
+      const result = await compactSession(
+        session.sessionId,
+        session.workingDirectory,
+        this.logger,
+        this.config.claude.apiKey,
+      );
+      const colorMap: Record<string, string> = { compacted: 'green', too_few: 'blue', no_session: 'blue', error: 'red' };
+      const titleMap: Record<string, string> = {
+        compacted: '✅ 会话已压缩',
+        too_few: 'ℹ️ 历史太短',
+        no_session: 'ℹ️ 无会话',
+        error: '❌ 压缩失败',
+      };
+      await this.sender.sendTextNotice(chatId, titleMap[result.status], result.message, colorMap[result.status]);
+    } catch (err) {
+      this.logger.error({ err, chatId }, '/compact handler failed');
+      await this.sender.sendTextNotice(chatId, '❌ 压缩失败', err instanceof Error ? err.message : String(err), 'red');
+    }
+  }
+
   /** Inject the doc sync service for /sync commands. */
   setDocSync(docSync: DocSync): void {
     this.commandHandler.setDocSync(docSync);
@@ -333,6 +378,14 @@ export class MessageBridge {
 
     // Handle commands (always allowed, even during pending questions)
     if (text.startsWith('/')) {
+      // /compact — trigger Claude Code's native compaction on the session.
+      // Handled here (not in CommandHandler) because it needs session id +
+      // the claude executable; only meaningful for the claude engine.
+      if (text.trim().split(/\s+/)[0].toLowerCase() === '/compact') {
+        await this.handleCompact(chatId);
+        return;
+      }
+
       const handled = await this.commandHandler.handle(msg);
       if (handled) return;
 

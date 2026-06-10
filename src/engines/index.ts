@@ -60,6 +60,7 @@ export { GeminiEngine } from './gemini/index.js';
 // Moving these behind the engine boundary lets consumers import from a single place.
 export {
   ClaudeExecutor,
+  compactSession,
   StreamProcessor,
   SessionManager,
   extractImagePaths,
@@ -70,5 +71,6 @@ export type {
   ExecutionHandle,
   ExecutorOptions,
   ApiContext,
+  CompactResult,
   DetectedTool,
 } from './claude/index.js';

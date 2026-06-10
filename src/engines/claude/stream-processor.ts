@@ -36,7 +36,7 @@ export class StreamProcessor {
   private _model: string | undefined;
   private _totalTokens: number | undefined;
   private _contextWindow: number | undefined;
-  private _quotaInfo: { usedPct: number; hoursToReset: number } | undefined;
+  private _quotaInfo: { usedPct: number; hoursToReset: number; secondary?: { usedPct: number; hoursToReset: number } } | undefined;
   // Track per-API-call usage from stream events for accurate context window display
   private _lastInputTokens: number | undefined;
   private _lastOutputTokens: number | undefined;
@@ -272,7 +272,7 @@ export class StreamProcessor {
       tool.status = 'done';
     }
 
-    const resultText = message.result || this.responseText;
+    const resultText = stripLeakedToolCalls(message.result || this.responseText);
     const isError = message.subtype !== 'success';
     // SDK sometimes wraps API errors as "success" with the error text as result
     const isApiError = !isError && isApiErrorResult(resultText);
@@ -489,4 +489,24 @@ function truncate(text: string, max: number): string {
 function isApiErrorResult(text: string): boolean {
   if (!text) return false;
   return /^API Error:\s*\d{3}\s/i.test(text);
+}
+
+function stripLeakedToolCalls(text: string): string {
+  if (!text) return text;
+  const original = text;
+  let t = text;
+  // Only strip REAL tool-call leaks (they always carry name="...").
+  // Prose mentions of the tag names (no name= attr) are left untouched.
+  t = t.replace(/<(?:antml:)?function_calls>[\s\S]*?<\/(?:antml:)?function_calls>/g, '');
+  t = t.replace(/<(?:antml:)?invoke\s+name="[\s\S]*?<\/(?:antml:)?invoke>/g, '');
+  // dangling/truncated real invoke (has name=), maybe preceded by a stray 'count' line
+  t = t.replace(/(?:^|\n)[ \t]*(?:count[ \t]*\n)?<(?:antml:)?invoke\s+name="[\s\S]*$/g, '');
+  t = t.replace(/<(?:antml:)?parameter\s+name="[\s\S]*?<\/(?:antml:)?parameter>/g, '');
+  t = t.replace(/<\/?(?:antml:)?parameter\s+name="[^>]*>/g, '');
+  t = t.replace(/<\/?(?:antml:)?function_calls>/g, '');
+  t = t.trim();
+  if (t.length === 0 && original.trim().length > 0) {
+    return '(本轮一个内部工具调用未正确执行，我重试一下)';
+  }
+  return t;
 }

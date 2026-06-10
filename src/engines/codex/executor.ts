@@ -13,6 +13,7 @@ import {
   translateCodexJsonEvent,
   type CodexJsonEvent,
 } from './jsonl-translator.js';
+import { readCodexSessionStatus } from './quota-reader.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -87,6 +88,10 @@ export class CodexExecutor {
     let sawResult = false;
     let stderr = '';
     let stdoutBuffer = '';
+    // Success result is held back (not enqueued live) so the close handler can
+    // enrich it with account quota read from the session rollout file — the
+    // quota is not present in the `exec --json` stdout stream.
+    let pendingResult: SDKMessage | undefined;
 
     this.logger.info({ cwd, hasSession: !!sessionId, outputsDir, engine: 'codex' }, 'Starting Codex execution');
 
@@ -107,8 +112,13 @@ export class CodexExecutor {
     const emitEvent = (event: CodexJsonEvent): void => {
       const messages = translateCodexJsonEvent(event, state);
       for (const message of messages) {
-        if (message.type === 'result') sawResult = true;
-        queue.enqueue(message);
+        if (message.type === 'result' && !message.is_error) {
+          // Hold the success result; close handler enriches + enqueues it.
+          sawResult = true;
+          pendingResult = message;
+        } else {
+          queue.enqueue(message);
+        }
       }
     };
 
@@ -169,6 +179,32 @@ export class CodexExecutor {
         if (code !== 0 && !sawResult) {
           const suffix = stderr.trim() ? `: ${stderr.trim()}` : '';
           finishWithError(`Codex exited with ${signal ? `signal ${signal}` : `code ${code}`}${suffix}`);
+        }
+        // Enrich the held success result with account-level quota and the
+        // correct context occupation, then emit it. The stdout `usage` is the
+        // cumulative session total; we override with last_token_usage so the
+        // ctx footer reflects current occupation (and tracks compaction).
+        if (pendingResult) {
+          try {
+            const status = readCodexSessionStatus(state.sessionId ?? sessionId);
+            if (status?.quota?.primary) {
+              pendingResult.quotaInfo = {
+                usedPct: status.quota.primary.usedPct,
+                hoursToReset: status.quota.primary.hoursToReset,
+                secondary: status.quota.secondary,
+              };
+            }
+            const mu = state.model ? pendingResult.modelUsage?.[state.model] : undefined;
+            if (mu && status?.lastTurnInputTokens !== undefined) {
+              mu.inputTokens = status.lastTurnInputTokens;
+              mu.outputTokens = status.lastTurnOutputTokens ?? 0;
+              if (status.contextWindow) mu.contextWindow = status.contextWindow;
+            }
+          } catch (err) {
+            this.logger.warn({ err }, 'Codex session status read failed (non-fatal, footer degraded)');
+          }
+          queue.enqueue(pendingResult);
+          pendingResult = undefined;
         }
         if (stderr.trim()) {
           this.logger.debug({ stderr: stderr.trim() }, 'Codex stderr');
