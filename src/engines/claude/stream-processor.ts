@@ -35,6 +35,12 @@ export interface DetectedTool {
 
 export class StreamProcessor {
   private responseText = '';
+  // Top-level assistant text must accumulate across the WHOLE turn. The model often
+  // emits an explanation, makes a tool call, then a short sign-off — that is multiple
+  // text blocks. message.result and a naive `responseText = block.text` keep only the
+  // LAST block, silently dropping everything the user saw stream before the tool call.
+  private _segments: string[] = []; // finalized top-level text blocks, in order (authoritative)
+  private _streamingText = ''; // current in-flight block (live preview, from stream deltas)
   private toolCalls: ToolCall[] = [];
   private currentToolName: string | null = null;
   private sessionId: string | undefined;
@@ -55,6 +61,20 @@ export class StreamProcessor {
   private _backgroundEvents: Map<string, BackgroundEvent> = new Map();
 
   constructor(private userPrompt: string) {}
+
+  // Recompute the visible response text = all committed blocks + the in-flight block.
+  private _syncResponseText(): void {
+    const joined = this._segments.join('\n\n');
+    this.responseText = this._streamingText
+      ? (joined ? joined + '\n\n' + this._streamingText : this._streamingText)
+      : joined;
+  }
+
+  // Top-level text blocks in order (committed + in-flight). Used to split the turn
+  // into separate process / conclusion cards.
+  getTextSegments(): string[] {
+    return this._streamingText ? [...this._segments, this._streamingText] : [...this._segments];
+  }
 
   processMessage(message: SDKMessage): CardState {
     // Capture session_id from any message
@@ -184,8 +204,15 @@ export class StreamProcessor {
       if (block.type === 'text' && block.text) {
         // Only accumulate text from top-level assistant messages (not subagent)
         if (message.parent_tool_use_id === null || message.parent_tool_use_id === undefined) {
-          // Full message text replaces accumulated stream text
-          this.responseText = block.text;
+          // Commit this finalized top-level text block, accumulating across the turn
+          // instead of overwriting. The dedup guard avoids double-counting if the SDK
+          // re-emits the same assistant message. The live preview for this block is
+          // now superseded by the authoritative text.
+          if (this._segments[this._segments.length - 1] !== block.text) {
+            this._segments.push(block.text);
+          }
+          this._streamingText = '';
+          this._syncResponseText();
         }
       } else if (block.type === 'tool_use' && block.name) {
         this.addToolCall(block.name, block.input);
@@ -234,12 +261,15 @@ export class StreamProcessor {
         this.addToolCall(block.name, undefined);
       }
       if (block?.type === 'text') {
-        // Reset for new text block
+        // New text block starting — reset the live preview buffer (the previous
+        // block is committed via the authoritative assistant message).
+        this._streamingText = '';
       }
     } else if (event.type === 'content_block_delta') {
       const delta = event.delta;
       if (delta?.type === 'text_delta' && delta.text) {
-        this.responseText += delta.text;
+        this._streamingText += delta.text;
+        this._syncResponseText();
       }
     } else if (event.type === 'content_block_stop') {
       // Tool may be complete
@@ -283,7 +313,15 @@ export class StreamProcessor {
       tool.status = 'done';
     }
 
-    const resultText = stripLeakedToolCalls(message.result || this.responseText);
+    // Prefer our accumulated multi-block text over message.result. The SDK's result
+    // field is only the LAST assistant text block, so a turn that emitted text both
+    // before and after a tool call would lose the earlier (often the substantive)
+    // part. this.responseText holds the full accumulation; fall back to result only
+    // if it is somehow longer (e.g. accumulation missed something).
+    const fullText = this.responseText && this.responseText.length >= (message.result || '').length
+      ? this.responseText
+      : (message.result || this.responseText);
+    const resultText = stripLeakedToolCalls(fullText);
     const isError = message.subtype !== 'success';
     // SDK sometimes wraps API errors as "success" with the error text as result
     const isApiError = !isError && isApiErrorResult(resultText);

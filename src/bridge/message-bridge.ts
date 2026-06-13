@@ -19,6 +19,7 @@ import { CostTracker } from '../utils/cost-tracker.js';
 import { metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 import { buildIncrementalContext } from '../feishu/group-context.js';
+import { splitProcessConclusion } from '../feishu/card-builder.js';
 
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes for user to answer
@@ -1021,7 +1022,7 @@ export class MessageBridge {
         await rateLimiter.cancelAndWait();
       }
 
-      await this.sendFinalCard(messageId, lastState, chatId);
+      await this.sendFinalCardOrSplit(messageId, lastState, chatId, processor.getTextSegments());
 
       // Audit + cost tracking
       const durationMs = Date.now() - startTime;
@@ -1553,6 +1554,59 @@ export class MessageBridge {
       try {
         await this.sender.sendText(chatId, `${statusEmoji} ${summary}`);
       } catch { /* last resort failed */ }
+    }
+  }
+
+  /**
+   * On a successful turn, split the response into a "process" card (tool calls +
+   * analysis, the original streaming card) and a separate "🎯 结论" card (the final
+   * conclusion, sent as a new message so it lands at the bottom). The user asked for
+   * a hard structural separation — not a soft in-text divider — so they can jump to
+   * the conclusion card or scroll up to the process. Falls back to a single card when
+   * there is nothing meaningful to separate or on error states.
+   */
+  private async sendFinalCardOrSplit(
+    messageId: string,
+    state: CardState,
+    chatId: string | undefined,
+    segments: string[],
+  ): Promise<void> {
+    const split = state.status === 'complete' ? splitProcessConclusion(segments) : null;
+    if (!split || !chatId) {
+      await this.sendFinalCard(messageId, state, chatId);
+      return;
+    }
+    // Process card = existing card, tool calls + process text, footer suppressed
+    // (stats live on the conclusion card at the bottom).
+    const processState: CardState = {
+      ...state,
+      responseText: split.process,
+      cardLabel: '过程 / 分析',
+      costUsd: undefined, durationMs: undefined, model: undefined,
+      totalTokens: undefined, contextWindow: undefined,
+      quotaInfo: undefined, sessionCostUsd: undefined,
+    };
+    for (let attempt = 0; attempt < FINAL_CARD_RETRIES; attempt++) {
+      if (await this.sender.updateCard(messageId, processState)) break;
+      await new Promise((r) => setTimeout(r, FINAL_CARD_BASE_DELAY_MS * Math.pow(2, attempt)));
+    }
+    // Conclusion card = new message at the bottom, carries the stats footer.
+    this.sessionManager.addUsage(chatId, state.totalTokens ?? 0, state.costUsd ?? 0, state.durationMs ?? 0);
+    const conclusionState: CardState = {
+      status: 'complete',
+      userPrompt: state.userPrompt,
+      responseText: split.conclusion,
+      toolCalls: [],
+      cardLabel: '🎯 结论',
+      costUsd: state.costUsd, durationMs: state.durationMs, model: state.model,
+      totalTokens: state.totalTokens, contextWindow: state.contextWindow,
+      quotaInfo: state.quotaInfo,
+      sessionCostUsd: this.sessionManager.getSession(chatId).cumulativeCostUsd,
+    };
+    try {
+      await this.sender.sendCard(chatId, conclusionState);
+    } catch (e) {
+      this.logger.warn({ err: e, chatId }, 'Failed to send conclusion card');
     }
   }
 

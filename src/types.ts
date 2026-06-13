@@ -33,6 +33,9 @@ export interface CardState {
   userPrompt: string;
   responseText: string;
   toolCalls: ToolCall[];
+  /** Optional header title override (keeps the status color/icon). Used to label
+   *  the split process/conclusion cards as "过程" / "🎯 结论". */
+  cardLabel?: string;
   costUsd?: number;
   durationMs?: number;
   errorMessage?: string;

@@ -69,6 +69,44 @@ function truncateContent(text: string): string {
   );
 }
 
+// Marker the assistant writes to delimit its final conclusion from the preceding
+// process/analysis, e.g. "━━━━━ 🎯 结论 ━━━━━". Matched loosely (≥3 heavy bars,
+// the word 结论 somewhere on the line).
+const CONCLUSION_MARKER_RE = /\n*[ \t]*━{3,}[^\n]*结论[^\n]*━{3,}[ \t]*\n*/;
+
+/**
+ * Split a turn's text into a "process" part and a "conclusion" part so the bridge
+ * can render them as two separate Feishu cards (user request: jump to the bottom
+ * card for the verdict, scroll up to the process card for the working).
+ *
+ * Priority:
+ *   1. An explicit conclusion marker the assistant wrote (semantic, precise).
+ *   2. Structural fallback: the LAST top-level text block is the conclusion and
+ *      everything before it is process (the model's natural explain→tool→sign-off).
+ * Returns null when there is nothing meaningful to separate (single short answer).
+ */
+export function splitProcessConclusion(
+  segments: string[],
+): { process: string; conclusion: string } | null {
+  const clean = segments.map((s) => (s || '').trim()).filter(Boolean);
+  if (clean.length === 0) return null;
+  const full = clean.join('\n\n');
+
+  const m = full.match(CONCLUSION_MARKER_RE);
+  if (m && m.index !== undefined) {
+    const process = full.slice(0, m.index).trim();
+    const conclusion = full.slice(m.index + m[0].length).trim();
+    if (process && conclusion) return { process, conclusion };
+  }
+
+  if (clean.length >= 2) {
+    const conclusion = clean[clean.length - 1];
+    const process = clean.slice(0, -1).join('\n\n').trim();
+    if (process && conclusion) return { process, conclusion };
+  }
+  return null;
+}
+
 export function buildCard(state: CardState): string {
   const config = STATUS_CONFIG[state.status];
   const elements: unknown[] = [];
@@ -223,7 +261,7 @@ export function buildCard(state: CardState): string {
     header: {
       template: config.color,
       title: {
-        content: `${config.icon} ${config.title}`,
+        content: state.cardLabel ? `${config.icon} ${state.cardLabel}` : `${config.icon} ${config.title}`,
         tag: 'plain_text',
       },
     },
