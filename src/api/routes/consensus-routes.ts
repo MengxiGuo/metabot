@@ -57,7 +57,7 @@ export async function handleConsensusRoutes(
     }
     if (new Set(bots).size !== bots.length) {
       jsonResponse(res, 400, {
-        error: 'Duplicate bot names — must be distinct. Same-model dupes only produce sampling noise, not real epistemic diversity. Use cross-engine bots (e.g. claude + gemini + codex) for meaningful consensus.',
+        error: 'Duplicate bot names — must be distinct. Same-model dupes only produce sampling noise, not real epistemic diversity. Use cross-engine bots (e.g. claude + codex + kimi) for meaningful consensus.',
       });
       return true;
     }

@@ -50,10 +50,9 @@ export interface CardState {
   sessionCostUsd?: number;
   /** Background tasks (e.g. Monitor) the agent has spawned during this turn. */
   backgroundEvents?: BackgroundEvent[];
-  /** Quota info for flat-tier engines. Gemini (Google Code Assist
-   *  retrieveUserQuota) sets only the primary fields; Codex (account-level
-   *  rate_limits) additionally sets `secondary` for the weekly window. When
-   *  present, card footer shows quota instead of `$cost`. */
+  /** Quota info for flat-tier engines. Codex account-level rate_limits
+   *  additionally sets `secondary` for the weekly window. When present, card
+   *  footer shows quota instead of `$cost`. */
   quotaInfo?: {
     usedPct: number;
     hoursToReset: number;

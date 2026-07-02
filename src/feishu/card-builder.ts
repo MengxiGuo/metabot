@@ -208,10 +208,8 @@ export function buildCard(state: CardState): string {
       parts.push(`ctx: ${tokensK}/${ctxK} (${pct}%)`);
     }
     if (state.status === 'complete' || state.status === 'error') {
-      // For Gemini (flat-tier AI Pro subscription), the $-cost slot is
-      // always $0.00 (no per-call cost). Replace with `quota: X% used (还有
-      // Yh reset)` when quotaInfo is present. Other engines fall back to
-      // the $-cost display.
+      // Some flat-tier engines surface quota in the footer instead of per-call
+      // cost. Other engines fall back to the $-cost display.
       if (state.quotaInfo) {
         const { usedPct, hoursToReset, secondary } = state.quotaInfo;
         const resetStr = hoursToReset >= 1

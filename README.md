@@ -1,12 +1,12 @@
 > 📌 **This is a personal fork of [xvirobotics/metabot](https://github.com/xvirobotics/metabot)**.
-> Adds: Gemini CLI engine, inter-bot multi-agent framework, N-bot Consensus Protocol, Pro-tier quota footer.
-> See **[FORK.md](FORK.md)** for setup steps and what's different from upstream.
+> Adds: inter-bot multi-agent framework, N-bot Consensus Protocol, and Codex CLI support.
+> Gemini CLI support has been removed from this branch.
 
 <div align="center">
 
 # 🤖 MetaBot
 
-### 在飞书 / Telegram / 微信上用手机控制 Claude Code、Kimi Code、Codex CLI 或 Gemini CLI
+### 在飞书 / Telegram / 微信上用手机控制 Claude Code、Kimi Code 或 Codex CLI
 
 *写代码 · 管 Agent · 自动化一切*
 
@@ -21,7 +21,6 @@
   <a href="https://github.com/anthropics/claude-code"><img src="https://img.shields.io/badge/Engine-Claude_Code-D97757?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude Code"></a>
   <a href="https://platform.moonshot.ai"><img src="https://img.shields.io/badge/Engine-Kimi_Code-1A73E8?style=for-the-badge&logoColor=white" alt="Kimi Code"></a>
   <a href="https://github.com/openai/codex"><img src="https://img.shields.io/badge/Engine-Codex_CLI-412991?style=for-the-badge&logo=openai&logoColor=white" alt="Codex CLI"></a>
-  <a href="https://github.com/google-gemini/gemini-cli"><img src="https://img.shields.io/badge/Engine-Gemini_CLI-4285F4?style=for-the-badge&logo=google&logoColor=white" alt="Gemini CLI (fork)"></a>
   <img src="https://img.shields.io/badge/Subscription-Native-22C55E?style=for-the-badge&logo=key&logoColor=white" alt="Native Subscription">
   <img src="https://img.shields.io/badge/Node.js-20+-339933?style=for-the-badge&logo=node.js&logoColor=white" alt="Node.js">
 </p>
@@ -37,7 +36,7 @@
 
 </div>
 
-> 支持 **Claude Code**、**Kimi Code**、**Codex CLI** 和 **Gemini CLI**（本 fork 新增）四大引擎 — 订阅 / API Key 任你选，每个 Bot 可独立选引擎。Gemini 引擎走 Google AI Pro 订阅，使用方法见 [FORK.md](FORK.md)。
+> 支持 **Claude Code**、**Kimi Code** 和 **Codex CLI** 三大引擎 — 订阅 / API Key 任你选，每个 Bot 可独立选引擎。
 
 ![MetaBot Demo](resources/metabot-demo.gif)
 
@@ -51,36 +50,18 @@ curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh
 
 ---
 
-## 四引擎：Claude Code ✕ Kimi Code ✕ Codex CLI ✕ Gemini CLI 并列一等支持
-
-MetaBot 不是只绑定一家 — 四大顶级 AI 编码 Agent 都内置原生支持，**你的订阅直接用**。
-（注：Gemini CLI 引擎是本 fork 新增，上游 xvirobotics/metabot 暂未包含。详见 [FORK.md](FORK.md)。）
-
-| | **Claude Code**（Anthropic） | **Kimi Code**（Moonshot） | **Codex CLI**（OpenAI） | **Gemini CLI**（Google） |
-|---|---|---|---|---|
-| **订阅直连** | ✅ `claude login` OAuth | ✅ `kimi login` | ✅ `codex login`，走 ChatGPT 订阅 | ✅ `gemini` 交互式 OAuth，走 Google AI Pro 订阅 |
-| **API Key 兜底** | ✅ `ANTHROPIC_API_KEY` / 第三方 Anthropic 兼容端 | ✅ Moonshot API Key | ✅ `OPENAI_API_KEY` / Codex profile | 暂仅订阅，未启用 API Key 路径 |
-| **上下文窗口** | 200k（Opus/Sonnet 可选 1M） | 256k（kimi-for-coding） | 400k（gpt-5.x-codex） | 1M（gemini-3.x） |
-| **工具能力** | Read/Write/Edit/Bash/Glob/Grep/WebSearch/MCP | 同上（Kimi CLI 原生 + `.claude/skills/` 自动发现） | Codex CLI 原生 sandbox + shell 工具链 | gemini-cli 原生工具链（含 `--approval-mode yolo`） |
-| **自主运行模式** | `bypassPermissions` | `yoloMode`（等价） | `--dangerously-bypass-approvals-and-sandbox` | `--approval-mode yolo` |
-| **子 Agent** | `.claude/agents/*.md` 自动加载 | 仅内置 `default` / `okabe` | 暂不支持子 Agent | 暂不支持子 Agent |
-| **工作区说明** | `CLAUDE.md` | `AGENTS.md`（安装器自动建软链） | `AGENTS.md`（Codex 官方约定） | `GEMINI.md`（gemini-cli 约定） |
-| **额度自动 fallback** | 单池 | 单池 | 单池 | ✅ Pro→Flash 自动降级（3.1-pro-preview 撞墙转 3-flash-preview） |
-| **卡片 footer 显示** | `$cost` | `$cost` | `$cost` | ✅ `quota: X% used (还有 Yh reset)` — 走 Code Assist API |
+## 三引擎：Claude Code ✕ Kimi Code ✕ Codex CLI
 
 **配置只需一行** — 每个 Bot 独立选引擎：
 ```json
 { "name": "bulma",  "engine": "kimi",   "kimi": { "thinking": true } }
 { "name": "goku",   "engine": "claude" }
 { "name": "vegeta", "engine": "codex",  "codex": { "model": "gpt-5.4-codex" } }
-{ "name": "piccolo","engine": "gemini", "gemini": { "model": "gemini-3.1-pro-preview", "approvalMode": "yolo" } }
 ```
 
 Codex 支持通过本机 `codex exec --json` CLI 接入，并使用 `codex exec resume` 续接聊天会话。启动 MetaBot 前，请先执行 `codex login` 或配置好 Codex API key/profile。
 
-Gemini 引擎使用 `gemini` CLI（`npm i -g @google/gemini-cli` 后执行 `gemini` 一次完成浏览器 OAuth），quota footer 数据直接读 `~/.gemini/oauth_creds.json` 调 Google Code Assist API。详细配置见 [FORK.md](FORK.md)。
-
-前端 Bot 用 Claude、后端 Bot 用 Kimi、Reviewer Bot 用 Gemini？完全可以。Agent 总线让它们互相委派任务，对面跑什么引擎对调用方透明。**本 fork 还实现了多 Agent 共识协议**（`mb consensus start`），跨引擎 reasoned consensus 而非廉价 alignment — 详见 [FORK.md](FORK.md) §3。
+前端 Bot 用 Claude、后端 Bot 用 Kimi、Reviewer Bot 用 Codex？完全可以。Agent 总线让它们互相委派任务，对面跑什么引擎对调用方透明。**本 fork 还实现了多 Agent 共识协议**（`mb consensus start`），跨引擎 reasoned consensus 而非廉价 alignment。
 
 ---
 

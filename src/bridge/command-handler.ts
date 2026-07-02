@@ -349,26 +349,18 @@ export class CommandHandler {
         { id: 'gpt-5.4', label: 'GPT-5.4', note: 'General flagship model' },
         { id: 'gpt-5.2-codex', label: 'GPT-5.2 Codex', note: 'Legacy Codex coding model' },
       ];
-      const geminiModels = [
-        { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro (preview)', note: 'Default · 1M context' },
-        { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', note: 'Stable fallback when 3.1 quota exhausted' },
-        { id: 'gemini-3-flash-preview', label: 'Gemini 3 Flash (preview)', note: 'Fastest · separate quota pool' },
-      ];
       const models = activeEngine === 'kimi' ? kimiModels
         : activeEngine === 'codex' ? codexModels
-        : activeEngine === 'gemini' ? geminiModels
         : claudeModels;
       const header = activeEngine === 'kimi'
         ? '**Available Kimi models:**'
         : activeEngine === 'codex'
           ? '**Common Codex models:**'
-          : activeEngine === 'gemini'
-            ? '**Available Gemini models:**'
-            : '**Available Claude models:**';
+          : '**Available Claude models:**';
       const lines = [
         `**Current engine:** \`${activeEngine}\`${session.engine ? ' (session override)' : ''}`,
         '',
-        '**Engines:** `/model claude`, `/model kimi`, `/model codex`, or `/model gemini` to switch.',
+        '**Engines:** `/model claude`, `/model kimi`, or `/model codex` to switch.',
         '',
         header,
         '',
@@ -382,8 +374,6 @@ export class CommandHandler {
         lines.push('_Tip: append `[1m]` to a model name to enable the 1M context window. Only Opus 4.8/4.7/4.6 and Sonnet 4.6 support it._');
       } else if (activeEngine === 'codex') {
         lines.push('_Tip: leave unset to use the Codex CLI default from `~/.codex/config.toml`._');
-      } else if (activeEngine === 'gemini') {
-        lines.push('_Tip: switch to `gemini-3-flash-preview` when 3.1 Pro hits `RESOURCE_EXHAUSTED` (separate quota pool)._');
       } else {
         lines.push('_Tip: leave unset to use the kimi-cli default (recommended for subscription users — the server picks the best available)._');
       }
@@ -425,8 +415,6 @@ export class CommandHandler {
         return this.config.kimi?.model;
       case 'codex':
         return this.config.codex?.model || this.config.codex?.displayModel;
-      case 'gemini':
-        return this.config.gemini?.model || this.config.gemini?.displayModel;
     }
   }
 
@@ -438,8 +426,6 @@ export class CommandHandler {
         return '`kimi-for-coding`, `kimi-k2`';
       case 'codex':
         return '`gpt-5.4-codex`, `gpt-5.4`, `gpt-5.2-codex`';
-      case 'gemini':
-        return '`gemini-3.1-pro-preview`, `gemini-2.5-pro`, `gemini-3-flash-preview`';
     }
   }
 
@@ -451,12 +437,10 @@ export class CommandHandler {
         return '_Make sure `kimi login` has been completed on this host._';
       case 'codex':
         return '_Make sure Codex CLI is authenticated (`codex login`) or configured with an API key._';
-      case 'gemini':
-        return '_Make sure `gemini` CLI is authenticated (run `NO_BROWSER=1 gemini` once interactively)._';
     }
   }
 }
 
 function isEngineName(value: string): value is EngineName {
-  return value === 'claude' || value === 'kimi' || value === 'codex' || value === 'gemini';
+  return value === 'claude' || value === 'kimi' || value === 'codex';
 }

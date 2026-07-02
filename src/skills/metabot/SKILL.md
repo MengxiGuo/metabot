@@ -79,7 +79,7 @@ If your system prompt has a `## Group Chat` block, you are in a group with other
   mb talk <peerBot> grouptalk-<groupId>-<peerBot> "<your message>"
   ```
 
-Your bot identity (`MB_CALLER_BOT`) is auto-set by the metabot engine wrapper for Claude / Gemini / Codex bots, so you do not need to prefix the command with `MB_CALLER_BOT=...`. (Kimi engine bots still need the manual prefix — see FORK.md known limitations.)
+Your bot identity (`MB_CALLER_BOT`) is auto-set by the metabot engine wrapper for Claude / Codex bots, so you do not need to prefix the command with `MB_CALLER_BOT=...`. (Kimi engine bots still need the manual prefix.)
 
 ### N-Bot Consensus Protocol
 
