@@ -57,11 +57,20 @@ function hasCredentialsFile(): boolean {
  * - Filters ANTHROPIC auth env vars only when an explicit API key is provided
  *   or credentials.json exists (so env-var-only users can still authenticate).
  * - Merges process.env so child inherits system PATH, TEMP, etc.
- * - Optionally injects an explicit ANTHROPIC_API_KEY from bots.json config.
+ * - Optionally injects explicit auth/provider env from bots.json config.
  */
-function createSpawnFn(explicitApiKey?: string, botName?: string): (options: SpawnOptions) => SpawnedProcess {
+interface ClaudeSpawnConfig {
+  apiKey?: string;
+  env?: Record<string, string>;
+  authTokenFile?: string;
+  botName?: string;
+}
+
+function createSpawnFn(config: ClaudeSpawnConfig): (options: SpawnOptions) => SpawnedProcess {
+  const { apiKey: explicitApiKey, env: explicitEnv, authTokenFile, botName } = config;
   // Decide once whether to filter auth env vars
-  const filterAuthVars = !!(explicitApiKey || hasCredentialsFile());
+  const hasExplicitProviderAuth = !!(explicitApiKey || explicitEnv?.ANTHROPIC_AUTH_TOKEN || authTokenFile);
+  const filterAuthVars = !!(hasExplicitProviderAuth || hasCredentialsFile());
 
   return (options: SpawnOptions): SpawnedProcess => {
     // SDK 0.3+ resolves options.command to the executable to run: the native
@@ -103,6 +112,19 @@ function createSpawnFn(explicitApiKey?: string, botName?: string): (options: Spa
     // Inject explicit API key from bots.json (after filtering, so it takes effect)
     if (explicitApiKey) {
       env.ANTHROPIC_API_KEY = explicitApiKey;
+    }
+
+    if (explicitEnv) {
+      Object.assign(env, explicitEnv);
+    }
+
+    if (authTokenFile) {
+      try {
+        const authToken = fs.readFileSync(authTokenFile, 'utf-8').trim();
+        if (authToken) env.ANTHROPIC_AUTH_TOKEN = authToken;
+      } catch (err: any) {
+        throw new Error(`Failed to read Claude authTokenFile ${authTokenFile}: ${err?.message || err}`);
+      }
     }
 
     // Tag outgoing `mb talk` calls with this bot's identity so the bridge
@@ -319,7 +341,12 @@ export class ClaudeExecutor {
       // Cross-platform spawn: custom spawn filters CLAUDE* env vars and uses
       // process.execPath to avoid PATH issues on Windows; fileURLToPath converts
       // file:// URLs to native paths for the SDK CLI entrypoint.
-      spawnClaudeCodeProcess: createSpawnFn(this.config.claude.apiKey, this.config.name),
+      spawnClaudeCodeProcess: createSpawnFn({
+        apiKey: this.config.claude.apiKey,
+        env: this.config.claude.env,
+        authTokenFile: this.config.claude.authTokenFile,
+        botName: this.config.name,
+      }),
       // SDK 0.3+ no longer bundles its own cli.js; it spawns the standalone
       // claude executable resolved below. executableArgs defaults to [].
       pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE,

@@ -26,6 +26,10 @@ export interface BotConfigBase {
      *  key instead of ~/.claude/.credentials.json. Supports cc-switch compatibility:
      *  leave unset to let Claude Code resolve auth dynamically. */
     apiKey: string | undefined;
+    /** Extra environment variables passed only to this Claude Code subprocess. */
+    env?: Record<string, string>;
+    /** File containing ANTHROPIC_AUTH_TOKEN for Claude-compatible providers. */
+    authTokenFile?: string;
     outputsBaseDir: string;
     downloadsDir: string;
   };
@@ -171,6 +175,12 @@ export interface KimiJsonConfig {
   contextWindow?: number;
 }
 
+/** Claude-specific overrides in bots.json. */
+export interface ClaudeJsonConfig {
+  env?: Record<string, string>;
+  authTokenFile?: string;
+}
+
 /** Gemini-specific overrides in bots.json. */
 export interface GeminiJsonConfig {
   executable?: string;
@@ -200,6 +210,7 @@ export interface CodexJsonConfig {
 /** Fields shared across all bot JSON entries (engine selection and engine overrides). */
 interface EngineJsonFields {
   engine?: EngineName;
+  claude?: ClaudeJsonConfig;
   kimi?: KimiJsonConfig;
   codex?: CodexJsonConfig;
   gemini?: GeminiJsonConfig;
@@ -385,6 +396,7 @@ function buildClaudeConfig(entry: {
   maxBudgetUsd?: number;
   model?: string;
   apiKey?: string;
+  claude?: ClaudeJsonConfig;
   outputsBaseDir?: string;
   downloadsDir?: string;
 }): BotConfigBase['claude'] {
@@ -394,6 +406,8 @@ function buildClaudeConfig(entry: {
     maxBudgetUsd: entry.maxBudgetUsd ?? (process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined),
     model: entry.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-opus-4-8',
     apiKey: entry.apiKey || undefined,
+    ...(entry.claude?.env ? { env: entry.claude.env } : {}),
+    ...(entry.claude?.authTokenFile ? { authTokenFile: expandUserPath(entry.claude.authTokenFile) } : {}),
     outputsBaseDir: entry.outputsBaseDir || process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
     downloadsDir: entry.downloadsDir || process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
   };
