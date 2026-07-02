@@ -1,8 +1,9 @@
 /**
  * N-Bot Consensus Protocol — type definitions and validators.
  *
- * Designed for N-bot generic operation. Most state is Map-keyed by bot name
- * to scale.
+ * Designed for N-bot generic operation; N=2 short-term (Claude+Gemini),
+ * N=3+ when Codex (or other engines) is wired in. Most state is Map-keyed
+ * by bot name to scale.
  */
 
 export type Phase = 0 | 1 | 2 | 3 | 4 | 5;

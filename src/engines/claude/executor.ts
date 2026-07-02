@@ -286,7 +286,7 @@ export type SDKMessage = {
   errors?: string[];
   // Model usage from result message (per-model breakdown)
   modelUsage?: Record<string, { inputTokens: number; outputTokens: number; contextWindow: number; costUSD: number }>;
-  /** Flat-tier quota status (for example Codex rate_limits). Surfaces in card footer. */
+  /** Flat-tier quota status (Gemini retrieveUserQuota / Codex rate_limits). Surfaces in card footer. */
   quotaInfo?: { usedPct: number; hoursToReset: number; secondary?: { usedPct: number; hoursToReset: number } };
   // Stream event fields
   event?: {

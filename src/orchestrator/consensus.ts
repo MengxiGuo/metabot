@@ -1,7 +1,12 @@
 /**
  * N-Bot Consensus Protocol — orchestrator (state machine driver).
  *
- * Drives the 5-phase consensus protocol across N bots.
+ * Drives the 5-phase consensus protocol across N bots. N=2 short-term
+ * (Claude + Gemini), N=3+ when Codex (or other engines) is wired in.
+ *
+ * Day 1 status: Phase 1 (Independent Take) implemented end-to-end.
+ * Phases 2-5 are stubbed and return early — they get fleshed out once
+ * Phase 1 smoke test passes.
  */
 
 import type { Logger } from '../utils/logger.js';
