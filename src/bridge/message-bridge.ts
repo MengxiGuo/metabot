@@ -504,8 +504,13 @@ export class MessageBridge {
       answerText = trimmed;
     }
 
-    // Store answer for this question
-    task.collectedAnswers[currentQuestion.header] = answerText;
+    // Store answer for this question.
+    // NOTE: key MUST be the full question text, not header — the Claude Agent SDK's
+    // AskUserQuestion output maps answers as "question text -> answer string" and
+    // matches injected updatedInput.answers by exact question text. Keying by header
+    // makes the SDK find no match and return EMPTY answers to the model ("selected
+    // but nothing happened"). See sdk-tools.d.ts AskUserQuestionOutput.answers.
+    task.collectedAnswers[currentQuestion.question] = answerText;
 
     this.logger.info(
       { chatId, answer: answerText, questionIndex: task.currentQuestionIndex, total: pending.questions.length, toolUseId: pending.toolUseId },
@@ -614,8 +619,9 @@ export class MessageBridge {
     // Fill remaining unanswered questions with timeout message
     for (let i = task.currentQuestionIndex; i < pending.questions.length; i++) {
       const q = pending.questions[i];
-      if (!task.collectedAnswers[q.header]) {
-        task.collectedAnswers[q.header] = '用户未及时回复，请自行判断继续';
+      // Key by full question text (not header) — see note in handleAnswer.
+      if (!task.collectedAnswers[q.question]) {
+        task.collectedAnswers[q.question] = '用户未及时回复，请自行判断继续';
       }
     }
 
