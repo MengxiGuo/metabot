@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 bots.json
+bots.json.bak*
 logs/
 nohup.out
 *.log

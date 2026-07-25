@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { buildCodexArgs } from '../src/engines/codex/executor.js';
+import { describe, expect, it, vi } from 'vitest';
+import { buildCodexArgs, CodexExecutor } from '../src/engines/codex/executor.js';
 import type { CodexBotConfig } from '../src/config.js';
 
 describe('buildCodexArgs', () => {
@@ -69,5 +69,44 @@ describe('buildCodexArgs', () => {
     const evil = 'ignore; rm -rf /\n`whoami`';
     const args = buildCodexArgs({}, cwd, evil, undefined, undefined);
     expect(args[args.length - 1]).toBe(evil);
+  });
+
+  it('refuses constrained turns in app-server mode instead of ignoring tool limits', async () => {
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const executor = new CodexExecutor({
+      name: 'codex-test',
+      engine: 'codex',
+      claude: {
+        defaultWorkingDirectory: cwd,
+        outputsBaseDir: '/tmp/metabot-test-outputs',
+        downloadsDir: '/tmp/metabot-test-downloads',
+      },
+      codex: { transport: 'app-server' },
+    } as any, logger as any);
+
+    const handle = executor.startExecution({
+      prompt: 'background drain',
+      cwd,
+      abortController: new AbortController(),
+      allowedTools: [],
+      maxTurns: 1,
+    });
+
+    const messages = [];
+    for await (const message of handle.stream) messages.push(message);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      type: 'result',
+      is_error: true,
+    });
+    expect(messages[0].errors?.[0]).toContain('does not support per-turn execution constraints');
+    expect(messages[0].errors?.[0]).toContain('allowedTools');
+    expect(messages[0].errors?.[0]).toContain('maxTurns');
   });
 });

@@ -5,9 +5,11 @@ import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import type { BotConfigBase } from '../../config.js';
+import type { GoalProgress } from '../../types.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { ModelFallbackManager } from './model-fallback.js';
+import { fetchArkQuotaInfo } from './ark-quota-fetcher.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -260,6 +262,14 @@ export interface ExecutorOptions {
   model?: string;
   /** Override allowed tools for this execution (empty array = no tools). */
   allowedTools?: string[];
+  /**
+   * Start Codex's official app-server goal operation instead of a normal turn.
+   * Only meaningful for the Codex app-server transport; other transports ignore it.
+   */
+  codexGoal?: {
+    objective: string;
+    tokenBudget?: number | null;
+  };
 }
 
 export type SDKMessage = {
@@ -287,7 +297,15 @@ export type SDKMessage = {
   // Model usage from result message (per-model breakdown)
   modelUsage?: Record<string, { inputTokens: number; outputTokens: number; contextWindow: number; costUSD: number }>;
   /** Flat-tier quota status (Gemini retrieveUserQuota / Codex rate_limits). Surfaces in card footer. */
-  quotaInfo?: { usedPct: number; hoursToReset: number; secondary?: { usedPct: number; hoursToReset: number } };
+  quotaInfo?: {
+    usedPct: number;
+    hoursToReset: number;
+    label?: string;
+    secondary?: { usedPct: number; hoursToReset: number; label?: string };
+    tertiary?: { usedPct: number; hoursToReset: number; label?: string };
+  };
+  /** Official goal-mode progress emitted by engines that expose it. */
+  goalProgress?: GoalProgress;
   // Stream event fields
   event?: {
     type: string;
@@ -308,6 +326,8 @@ export type SDKMessage = {
 
 export interface ExecutionHandle {
   stream: AsyncGenerator<SDKMessage>;
+  /** Latest low-level engine activity, including events not surfaced to the UI. */
+  getLastActivityAt?(): number | undefined;
   sendAnswer(toolUseId: string, sessionId: string, answerText: string): void;
   /**
    * Resolve a pending AskUserQuestion PreToolUse hook with the user's answers.
@@ -555,6 +575,7 @@ export class ClaudeExecutor {
 
     const logger = this.logger;
     const fallback = this.fallback;
+    const claudeConfig = this.config.claude;
     const activeModel = (queryOptions.model as string | undefined) ?? this.config.claude.model;
     const configuredModel = this.config.claude.model;
     const wasProbing = !!configuredModel
@@ -587,6 +608,12 @@ export class ClaudeExecutor {
           const msg = result.value as SDKMessage;
           if (msg.type === 'result' && msg.is_error !== true) {
             sawSuccessfulResult = true;
+            try {
+              const quota = await fetchArkQuotaInfo(claudeConfig, logger);
+              if (quota) msg.quotaInfo = quota;
+            } catch (err: any) {
+              logger.warn({ err: err?.message }, 'Ark quota fetch failed (non-fatal, footer will omit quota)');
+            }
           }
           yield msg;
         }
@@ -715,6 +742,8 @@ export class ClaudeExecutor {
     });
 
     const iterator = stream[Symbol.asyncIterator]();
+    const claudeConfig = this.config.claude;
+    const logger = this.logger;
 
     try {
       while (true) {
@@ -723,7 +752,16 @@ export class ClaudeExecutor {
           abortPromise,
         ]);
         if (result.done) break;
-        yield result.value as SDKMessage;
+        const msg = result.value as SDKMessage;
+        if (msg.type === 'result' && msg.is_error !== true) {
+          try {
+            const quota = await fetchArkQuotaInfo(claudeConfig, logger);
+            if (quota) msg.quotaInfo = quota;
+          } catch (err: any) {
+            logger.warn({ err: err?.message }, 'Ark quota fetch failed (non-fatal, footer will omit quota)');
+          }
+        }
+        yield msg;
       }
     } catch (err: any) {
       if (err.name === 'AbortError' || abortController.signal.aborted) {

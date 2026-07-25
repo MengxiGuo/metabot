@@ -7,9 +7,28 @@ import type { EngineName } from '../engines/index.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import type { DocSync } from '../sync/doc-sync.js';
+import { codexAppServerEnabled } from '../engines/codex/app-server-client.js';
+import {
+  clearCodexGoal,
+  getCodexGoal,
+  setCodexGoal,
+  type CodexGoal,
+  type CodexGoalStatus,
+} from '../engines/codex/goal.js';
+
+interface RunningTaskInfo {
+  startTime: number;
+  userId?: string;
+}
+
+interface ScheduleStopResult {
+  activeCount: number;
+  paused: Array<{ id: string; label?: string; cronExpr: string }>;
+}
 
 export class CommandHandler {
   private docSync: DocSync | null = null;
+  private pauseSchedulesForChat?: (chatId: string) => ScheduleStopResult;
 
   constructor(
     private config: BotConfigBase,
@@ -18,13 +37,17 @@ export class CommandHandler {
     private sessionManager: SessionManager,
     private memoryClient: MemoryClient,
     private audit: AuditLogger,
-    private getRunningTask: (chatId: string) => { startTime: number } | undefined,
+    private getRunningTask: (chatId: string) => RunningTaskInfo | undefined,
     private stopTask: (chatId: string) => void,
   ) {}
 
   /** Set the doc sync service (optional, only available for Feishu bots). */
   setDocSync(docSync: DocSync): void {
     this.docSync = docSync;
+  }
+
+  setScheduleStopper(stopSchedulesForChat: (chatId: string) => ScheduleStopResult): void {
+    this.pauseSchedulesForChat = stopSchedulesForChat;
   }
 
   /** Returns true if the message was handled as a command, false otherwise. */
@@ -42,11 +65,13 @@ export class CommandHandler {
         await this.sender.sendTextNotice(chatId, '📖 Help', [
           '**Available Commands:**',
           '`/reset` - Clear session, start fresh',
-          '`/stop` - Abort current running task',
+          '`/stop` - Abort current running task; pauses a single active schedule in this chat when safe',
           '`/status` - Show current session info',
           '`/model` - Show current engine/model; `/model list` - Available options',
           '`/model claude`, `/model kimi`, or `/model codex` - Switch engine (resets session)',
           '`/model <name>` - Set model for current engine',
+          '`/goal` - Show or set Codex official goal mode (Codex app-server only)',
+          '`/dr <question>` - Start the Deep Research GUI SOP and export the report',
           '`/cd <path>` - Switch working directory for this chat (resets session)',
           '`/memory` - Memory document commands',
           '`/help` - Show this help message',
@@ -73,10 +98,35 @@ export class CommandHandler {
 
       case '/stop': {
         const task = this.getRunningTask(chatId);
+        const scheduleStop =
+          !task || task.userId === 'scheduler'
+            ? this.pauseSchedulesForChat?.(chatId)
+            : undefined;
         if (task) {
           this.audit.log({ event: 'task_stopped', botName: this.config.name, chatId, userId, durationMs: Date.now() - task.startTime });
           this.stopTask(chatId);
-          await this.sender.sendTextNotice(chatId, '🛑 Stopped', 'Current task has been aborted.', 'orange');
+          const paused = scheduleStop?.paused ?? [];
+          const extra = paused.length > 0
+            ? `\nPaused schedule: \`${paused[0].id}\``
+            : scheduleStop && scheduleStop.activeCount > 1
+              ? `\nFound ${scheduleStop.activeCount} active schedules; left them unchanged to avoid pausing the wrong one.`
+              : '';
+          await this.sender.sendTextNotice(chatId, '🛑 Stopped', `Current task has been aborted.${extra}`, 'orange');
+        } else if (scheduleStop && scheduleStop.paused.length > 0) {
+          const paused = scheduleStop.paused[0];
+          await this.sender.sendTextNotice(
+            chatId,
+            '🛑 Schedule Paused',
+            `No running task. Paused active schedule \`${paused.id}\` (${paused.label || paused.cronExpr}).`,
+            'orange',
+          );
+        } else if (scheduleStop && scheduleStop.activeCount > 1) {
+          await this.sender.sendTextNotice(
+            chatId,
+            'ℹ️ No Running Task',
+            `No running task. Found ${scheduleStop.activeCount} active schedules for this bot/chat; /stop left them unchanged to avoid pausing the wrong one.`,
+            'blue',
+          );
         } else {
           await this.sender.sendTextNotice(chatId, 'ℹ️ No Running Task', 'There is no task to stop.', 'blue');
         }
@@ -116,6 +166,22 @@ export class CommandHandler {
       case '/model': {
         const args = text.slice('/model'.length).trim();
         await this.handleModelCommand(chatId, args);
+        return true;
+      }
+
+      case '/goal': {
+        const args = text.slice('/goal'.length).trim();
+        try {
+          return await this.handleGoalCommand(chatId, args);
+        } catch (err: any) {
+          this.logger.error({ err, chatId }, '/goal command failed');
+          await this.sender.sendTextNotice(
+            chatId,
+            '❌ Goal Failed',
+            err?.message || String(err),
+            'red',
+          );
+        }
         return true;
       }
 
@@ -415,6 +481,136 @@ export class CommandHandler {
       `Session model set to \`${newModel}\` on engine \`${activeEngine}\`. It will take effect on the next message.`,
       'green',
     );
+  }
+
+  private async handleGoalCommand(chatId: string, args: string): Promise<boolean> {
+    const session = this.sessionManager.getSession(chatId);
+    const activeEngine = session.engine ?? resolveEngineName(this.config);
+    const codexConfig = this.config.codex ?? {};
+
+    if (activeEngine !== 'codex') {
+      await this.sender.sendTextNotice(
+        chatId,
+        'ℹ️ Goal Unavailable',
+        `Current engine is \`${activeEngine}\`. Official Codex goal mode only applies to the \`codex\` engine.`,
+        'blue',
+      );
+      return true;
+    }
+
+    if (!codexAppServerEnabled(codexConfig)) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '⚠️ Goal Requires Codex App Server',
+        [
+          'Official Codex `/goal` is not available through `codex exec`.',
+          '',
+          'Enable it with `codex.transport: "app-server"` in the bot config, then restart MetaBot.',
+          '',
+          '_No fake MetaBot-level goal was created._',
+        ].join('\n'),
+        'orange',
+      );
+      return true;
+    }
+
+    const [rawSubcmd] = args.split(/\s+/).filter(Boolean);
+    const subcmd = rawSubcmd?.toLowerCase();
+
+    if (!args || subcmd === 'status' || subcmd === 'show') {
+      if (!session.sessionId) {
+        await this.sender.sendTextNotice(chatId, '🎯 Goal', 'No active Codex thread yet. Use `/goal <objective>` to create one.', 'blue');
+        return true;
+      }
+      const goal = await getCodexGoal({
+        codexConfig,
+        logger: this.logger,
+        botName: this.config.name,
+        threadId: session.sessionId,
+      });
+      await this.sender.sendTextNotice(chatId, '🎯 Goal', goal ? this.formatGoal(goal) : 'No goal is set for this Codex thread.', goal ? 'green' : 'blue');
+      return true;
+    }
+
+    if (subcmd === 'clear' || subcmd === 'reset') {
+      if (!session.sessionId) {
+        await this.sender.sendTextNotice(chatId, '🎯 Goal', 'No active Codex thread; nothing to clear.', 'blue');
+        return true;
+      }
+      await clearCodexGoal({
+        codexConfig,
+        logger: this.logger,
+        botName: this.config.name,
+        threadId: session.sessionId,
+      });
+      await this.sender.sendTextNotice(chatId, '✅ Goal Cleared', 'Official Codex goal cleared for this thread.', 'green');
+      return true;
+    }
+
+    if (subcmd === 'pause' || subcmd === 'paused' || subcmd === 'resume' || subcmd === 'active' || subcmd === 'complete' || subcmd === 'blocked') {
+      if (!session.sessionId) {
+        await this.sender.sendTextNotice(chatId, '🎯 Goal', 'No active Codex thread. Set an objective first with `/goal <objective>`.', 'orange');
+        return true;
+      }
+      const status: CodexGoalStatus = subcmd === 'pause' || subcmd === 'paused'
+        ? 'paused'
+        : subcmd === 'resume' || subcmd === 'active'
+          ? 'active'
+          : subcmd as CodexGoalStatus;
+      const goal = await setCodexGoal({
+        codexConfig,
+        logger: this.logger,
+        botName: this.config.name,
+        threadId: session.sessionId,
+        status,
+      });
+      await this.sender.sendTextNotice(chatId, '✅ Goal Updated', goal ? this.formatGoal(goal) : `Goal status set to \`${status}\`.`, 'green');
+      return true;
+    }
+
+    const parsed = this.parseGoalSetArgs(args.startsWith('set ') ? args.slice(4).trim() : args);
+    if (!parsed.objective) {
+      await this.sender.sendTextNotice(chatId, '🎯 Goal', [
+        'Usage:',
+        '- `/goal` — Show current official Codex goal',
+        '- `/goal <objective>` — Set or replace goal',
+        '- `/goal <objective> --budget 100000` — Set goal with token budget',
+        '- `/goal pause|resume|complete|blocked` — Update status',
+        '- `/goal clear` — Clear goal',
+      ].join('\n'), 'blue');
+      return true;
+    }
+
+    if (parsed.objective.length > 4000) {
+      await this.sender.sendTextNotice(chatId, '❌ Goal Too Long', 'Codex goal objective must be 4000 characters or fewer.', 'red');
+      return true;
+    }
+
+    // Let MessageBridge run `/goal <objective>` through the normal task card
+    // path, where CodexExecutor starts the official goal operation and streams
+    // runtime-generated continuation turns. CommandHandler only owns goal
+    // management subcommands above.
+    return false;
+  }
+
+  private parseGoalSetArgs(args: string): { objective: string; tokenBudget?: number | null } {
+    const budgetMatch = args.match(/\s+--budget\s+(\d+)\s*$/);
+    if (!budgetMatch) return { objective: args.trim() };
+    return {
+      objective: args.slice(0, budgetMatch.index).trim(),
+      tokenBudget: Number.parseInt(budgetMatch[1], 10),
+    };
+  }
+
+  private formatGoal(goal: CodexGoal): string {
+    const lines = [
+      `**Status:** \`${goal.status}\``,
+      `**Thread:** \`${goal.threadId.slice(0, 8)}...\``,
+      `**Objective:** ${goal.objective}`,
+      `**Tokens:** ${goal.tokensUsed}${goal.tokenBudget ? ` / ${goal.tokenBudget}` : ''}`,
+      `**Time:** ${Math.round(goal.timeUsedSeconds / 60)} min`,
+    ];
+    return lines.join('\n');
   }
 
   private defaultModelForEngine(engine: EngineName): string | undefined {

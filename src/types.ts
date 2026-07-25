@@ -28,6 +28,19 @@ export interface BackgroundEvent {
   lastEvent?: string;
 }
 
+export interface GoalProgress {
+  threadId?: string;
+  objective: string;
+  status: string;
+  tokenBudget?: number | null;
+  tokensUsed?: number;
+  timeUsedSeconds?: number;
+  /** True when usage includes the current in-flight turn and may differ slightly from `/goal`. */
+  estimated?: boolean;
+  /** Latest goal-level event supplied by the execution transport. */
+  lastEvent?: string;
+}
+
 export interface CardState {
   status: CardStatus;
   userPrompt: string;
@@ -50,6 +63,8 @@ export interface CardState {
   sessionCostUsd?: number;
   /** Background tasks (e.g. Monitor) the agent has spawned during this turn. */
   backgroundEvents?: BackgroundEvent[];
+  /** Official goal-mode progress, currently emitted by Codex app-server. */
+  goalProgress?: GoalProgress;
   /** Quota info for flat-tier engines. Gemini (Google Code Assist
    *  retrieveUserQuota) sets only the primary fields; Codex (account-level
    *  rate_limits) additionally sets `secondary` for the weekly window. When
@@ -57,10 +72,18 @@ export interface CardState {
   quotaInfo?: {
     usedPct: number;
     hoursToReset: number;
+    label?: string;
     /** Codex weekly window (rate_limits.secondary). */
     secondary?: {
       usedPct: number;
       hoursToReset: number;
+      label?: string;
+    };
+    /** Optional third window, used by providers that expose monthly limits. */
+    tertiary?: {
+      usedPct: number;
+      hoursToReset: number;
+      label?: string;
     };
   };
 }

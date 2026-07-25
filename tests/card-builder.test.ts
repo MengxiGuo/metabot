@@ -34,6 +34,22 @@ describe('buildCard', () => {
     expect(md.content).toContain('⏳');
   });
 
+  it('shows elapsed time for a running task with no visible output yet', () => {
+    const state: CardState = {
+      status: 'running',
+      userPrompt: 'long goal',
+      responseText: '',
+      toolCalls: [],
+      durationMs: 125_000,
+    };
+    const json = JSON.parse(buildCard(state));
+    const progress = json.elements.find(
+      (e: any) => e.tag === 'markdown' && e.content.includes('任务仍在执行'),
+    );
+    expect(progress).toBeDefined();
+    expect(progress.content).toContain('已运行 2min');
+  });
+
   it('builds complete card with stats', () => {
     const state: CardState = {
       status: 'complete',
@@ -114,7 +130,7 @@ describe('buildCard', () => {
       toolCalls: [],
     };
     const json = JSON.parse(buildCard(state));
-    const md = json.elements.find((e: any) => e.tag === 'markdown' && e.content.includes('truncated'));
+    const md = json.elements.find((e: any) => e.tag === 'markdown' && /内容过长|truncated/.test(e.content));
     expect(md).toBeDefined();
   });
 
@@ -150,6 +166,37 @@ describe('buildCard', () => {
     const json = JSON.parse(buildCard(state));
     const bg = json.elements.find((e: any) => e.tag === 'markdown' && /Background/.test(e.content));
     expect(bg).toBeUndefined();
+  });
+
+  it('renders official goal progress with usage and current action', () => {
+    const state: CardState = {
+      status: 'running',
+      userPrompt: 'continue',
+      responseText: 'Working through it...',
+      toolCalls: [
+        { name: 'Read', detail: '`src/a.ts`', status: 'done' },
+        { name: 'Bash', detail: '`npm test`', status: 'running' },
+      ],
+      goalProgress: {
+        threadId: '019f26dd-b73d-7761-91cb-07638c430efe',
+        objective: 'Ship official Codex goal progress cards',
+        status: 'active',
+        tokenBudget: 20000,
+        tokensUsed: 1234,
+        timeUsedSeconds: 95,
+        estimated: true,
+        lastEvent: 'usage updated',
+      },
+    };
+    const json = JSON.parse(buildCard(state));
+    const goal = json.elements.find((e: any) => e.tag === 'markdown' && /Goal/.test(e.content));
+    expect(goal).toBeDefined();
+    expect(goal.content).toContain('Ship official Codex goal progress cards');
+    expect(goal.content).toContain('tokens ~1.2k/20.0k');
+    expect(goal.content).toContain('time ~2min');
+    expect(goal.content).toContain('Bash');
+    expect(goal.content).toContain('usage updated');
+    expect(goal.content).toContain('Read done');
   });
 });
 

@@ -248,6 +248,45 @@ describe('TaskScheduler - Recurring Tasks', () => {
     scheduler.destroy();
   });
 
+  it('keeps recurring tasks active when an instance cannot run because chat is busy', async () => {
+    const registry = createMockRegistry(true, true);
+    const logger = createMockLogger();
+    const scheduler = new TaskScheduler(registry, logger);
+
+    let callCount = 0;
+    mockNextCron.mockImplementation(() => {
+      callCount++;
+      return callCount === 1
+        ? Date.now() + 100
+        : Date.now() + 60_000;
+    });
+
+    const recurring = scheduler.scheduleRecurring({
+      botName: 'testbot',
+      chatId: 'chat1',
+      prompt: 'Do work',
+      cronExpr: '* * * * *',
+      label: 'Busy recurring',
+    });
+
+    await vi.advanceTimersByTimeAsync(200 + 6 * 30_000);
+
+    const updated = scheduler.getRecurringTask(recurring.id);
+    expect(updated?.status).toBe('active');
+    expect(updated?.currentChildId).toBeUndefined();
+    expect(updated?.nextExecuteAt).toBeGreaterThan(Date.now());
+
+    const bot = (registry.get as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+    expect(bot.bridge.executeApiTask).not.toHaveBeenCalled();
+    expect(bot.sender.sendTextNotice).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ recurringId: recurring.id, chatId: 'chat1' }),
+      'Recurring task instance skipped because chat stayed busy; recurring task remains active',
+    );
+
+    scheduler.destroy();
+  });
+
   it('persists and restores recurring tasks across instances', () => {
     const logger = createMockLogger();
     const registry = createMockRegistry();

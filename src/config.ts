@@ -30,6 +30,8 @@ export interface BotConfigBase {
     env?: Record<string, string>;
     /** File containing ANTHROPIC_AUTH_TOKEN for Claude-compatible providers. */
     authTokenFile?: string;
+    /** Optional Volcengine Ark control-plane credentials for Coding/Agent Plan quota. */
+    arkQuota?: ArkQuotaConfig;
     outputsBaseDir: string;
     downloadsDir: string;
   };
@@ -74,6 +76,8 @@ export interface GeminiBotConfig {
 /** Codex-specific overrides. Populated only when engine === 'codex'. */
 export interface CodexBotConfig {
   executable?: string;
+  /** Codex execution transport. 'exec' keeps the legacy codex exec path; 'app-server' enables official thread APIs like goal. */
+  transport?: 'exec' | 'app-server';
   model?: string;
   displayModel?: string;
   profile?: string;
@@ -84,6 +88,12 @@ export interface CodexBotConfig {
   contextWindow?: number;
   extraArgs?: string[];
   env?: Record<string, string>;
+  /**
+   * Browser origins that MetaBot may approve automatically when Codex app-server
+   * asks for browser-origin access. Exact origins only, e.g.
+   * "https://chatgpt.com".
+   */
+  autoApproveBrowserOrigins?: string[];
 }
 
 /** Feishu bot config (extends base with Feishu credentials). */
@@ -117,11 +127,24 @@ export interface PeerConfig {
   secret?: string;
 }
 
+export interface ConsensusProfileConfig {
+  /** Panelist bots that produce independent takes and critiques. */
+  panelists: string[];
+  /** Optional non-panelist bot used first in Phase 4 synthesis. */
+  synthesizerBot?: string;
+  type?: 'empirical' | 'architectural' | 'preference';
+  stakes?: 'low' | 'medium' | 'high';
+  costCapUsd?: number;
+  maxRounds?: number;
+}
+
 export interface AppConfig {
   feishuBots: BotConfig[];
   telegramBots: TelegramBotConfig[];
   webBots: BotConfigBase[];
   wechatBots: WechatBotConfig[];
+  /** Optional named consensus presets. Bot names are deployment-local. */
+  consensusProfiles: Record<string, ConsensusProfileConfig>;
   /** Dedicated Feishu service app for wiki sync & doc reader (independent of chat bots). */
   feishuService?: {
     appId: string;
@@ -179,6 +202,20 @@ export interface KimiJsonConfig {
 export interface ClaudeJsonConfig {
   env?: Record<string, string>;
   authTokenFile?: string;
+  arkQuota?: ArkQuotaJsonConfig;
+}
+
+export interface ArkQuotaJsonConfig {
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  accessKeyIdFile?: string;
+  secretAccessKeyFile?: string;
+  region?: string;
+}
+
+export interface ArkQuotaConfig extends ArkQuotaJsonConfig {
+  accessKeyIdFile?: string;
+  secretAccessKeyFile?: string;
 }
 
 /** Gemini-specific overrides in bots.json. */
@@ -195,6 +232,8 @@ export interface GeminiJsonConfig {
 /** Codex-specific overrides in bots.json. */
 export interface CodexJsonConfig {
   executable?: string;
+  /** Codex execution transport. 'exec' keeps the legacy codex exec path; 'app-server' enables official thread APIs like goal. */
+  transport?: 'exec' | 'app-server';
   model?: string;
   displayModel?: string;
   profile?: string;
@@ -205,6 +244,7 @@ export interface CodexJsonConfig {
   contextWindow?: number;
   extraArgs?: string[];
   env?: Record<string, string>;
+  autoApproveBrowserOrigins?: string[];
 }
 
 /** Fields shared across all bot JSON entries (engine selection and engine overrides). */
@@ -403,26 +443,57 @@ function buildClaudeConfig(entry: {
   return {
     defaultWorkingDirectory: expandUserPath(entry.defaultWorkingDirectory),
     maxTurns: entry.maxTurns ?? (process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined),
-    maxBudgetUsd: entry.maxBudgetUsd ?? (process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined),
+    maxBudgetUsd:
+      entry.maxBudgetUsd ??
+      (process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined),
     model: entry.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-opus-4-8',
     apiKey: entry.apiKey || undefined,
     ...(entry.claude?.env ? { env: entry.claude.env } : {}),
     ...(entry.claude?.authTokenFile ? { authTokenFile: expandUserPath(entry.claude.authTokenFile) } : {}),
-    outputsBaseDir: entry.outputsBaseDir || process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
-    downloadsDir: entry.downloadsDir || process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
+    ...(entry.claude?.arkQuota
+      ? {
+          arkQuota: {
+            ...entry.claude.arkQuota,
+            ...(entry.claude.arkQuota.accessKeyIdFile
+              ? { accessKeyIdFile: expandUserPath(entry.claude.arkQuota.accessKeyIdFile) }
+              : {}),
+            ...(entry.claude.arkQuota.secretAccessKeyFile
+              ? { secretAccessKeyFile: expandUserPath(entry.claude.arkQuota.secretAccessKeyFile) }
+              : {}),
+          },
+        }
+      : {}),
+    outputsBaseDir:
+      entry.outputsBaseDir ||
+      process.env.OUTPUTS_BASE_DIR ||
+      path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
+    downloadsDir:
+      entry.downloadsDir ||
+      process.env.DOWNLOADS_DIR ||
+      path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
   };
 }
 
 function buildCodexConfig(entry?: CodexJsonConfig): BotConfigBase['codex'] | undefined {
+  const envAutoApproveOrigins = process.env.CODEX_AUTO_APPROVE_BROWSER_ORIGINS
+    ?.split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
   const cfg: BotConfigBase['codex'] = {
     ...(process.env.CODEX_EXECUTABLE_PATH ? { executable: process.env.CODEX_EXECUTABLE_PATH } : {}),
+    ...(process.env.CODEX_TRANSPORT ? { transport: process.env.CODEX_TRANSPORT as CodexJsonConfig['transport'] } : {}),
     ...(process.env.CODEX_MODEL ? { model: process.env.CODEX_MODEL } : {}),
     ...(process.env.CODEX_DISPLAY_MODEL ? { displayModel: process.env.CODEX_DISPLAY_MODEL } : {}),
     ...(process.env.CODEX_PROFILE ? { profile: process.env.CODEX_PROFILE } : {}),
-    ...(process.env.CODEX_APPROVAL_POLICY ? { approvalPolicy: process.env.CODEX_APPROVAL_POLICY as CodexJsonConfig['approvalPolicy'] } : {}),
+    ...(process.env.CODEX_APPROVAL_POLICY
+      ? { approvalPolicy: process.env.CODEX_APPROVAL_POLICY as CodexJsonConfig['approvalPolicy'] }
+      : {}),
     ...(process.env.CODEX_SANDBOX ? { sandbox: process.env.CODEX_SANDBOX as CodexJsonConfig['sandbox'] } : {}),
-    ...(process.env.CODEX_BYPASS_APPROVALS_AND_SANDBOX === 'true' ? { dangerouslyBypassApprovalsAndSandbox: true } : {}),
+    ...(process.env.CODEX_BYPASS_APPROVALS_AND_SANDBOX === 'true'
+      ? { dangerouslyBypassApprovalsAndSandbox: true }
+      : {}),
     ...(process.env.CODEX_CONTEXT_WINDOW ? { contextWindow: parseInt(process.env.CODEX_CONTEXT_WINDOW, 10) } : {}),
+    ...(envAutoApproveOrigins?.length ? { autoApproveBrowserOrigins: envAutoApproveOrigins } : {}),
     ...(entry ?? {}),
   };
   return Object.keys(cfg).length > 0 ? cfg : undefined;
@@ -433,7 +504,9 @@ function buildGeminiConfig(entry?: GeminiJsonConfig): BotConfigBase['gemini'] | 
     ...(process.env.GEMINI_EXECUTABLE_PATH ? { executable: process.env.GEMINI_EXECUTABLE_PATH } : {}),
     ...(process.env.GEMINI_MODEL ? { model: process.env.GEMINI_MODEL } : {}),
     ...(process.env.GEMINI_DISPLAY_MODEL ? { displayModel: process.env.GEMINI_DISPLAY_MODEL } : {}),
-    ...(process.env.GEMINI_APPROVAL_MODE ? { approvalMode: process.env.GEMINI_APPROVAL_MODE as GeminiJsonConfig['approvalMode'] } : {}),
+    ...(process.env.GEMINI_APPROVAL_MODE
+      ? { approvalMode: process.env.GEMINI_APPROVAL_MODE as GeminiJsonConfig['approvalMode'] }
+      : {}),
     ...(process.env.GEMINI_CONTEXT_WINDOW ? { contextWindow: parseInt(process.env.GEMINI_CONTEXT_WINDOW, 10) } : {}),
     ...(entry ?? {}),
   };
@@ -460,7 +533,8 @@ function feishuBotFromEnv(): BotConfig {
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
       model: process.env.CLAUDE_MODEL || 'claude-opus-4-8',
       apiKey: undefined,
-      outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
+      outputsBaseDir:
+        process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
     },
   };
@@ -483,7 +557,8 @@ function telegramBotFromEnv(): TelegramBotConfig {
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
       model: process.env.CLAUDE_MODEL || 'claude-opus-4-8',
       apiKey: undefined,
-      outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
+      outputsBaseDir:
+        process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
     },
   };
@@ -506,8 +581,12 @@ function wechatBotFromEnv(): WechatBotConfig {
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
       model: process.env.CLAUDE_MODEL || 'claude-opus-4-8',
       apiKey: undefined,
-      outputsBaseDir: expandUserPath(process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`)),
-      downloadsDir: expandUserPath(process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`)),
+      outputsBaseDir: expandUserPath(
+        process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
+      ),
+      downloadsDir: expandUserPath(
+        process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
+      ),
     },
   };
 }
@@ -520,12 +599,67 @@ export interface PeerJsonEntry {
   secret?: string;
 }
 
+export interface ConsensusProfileJsonEntry {
+  /** Preferred name. */
+  panelists?: string[];
+  /** Backward/ergonomic alias accepted by config loader. */
+  bots?: string[];
+  synthesizerBot?: string;
+  type?: 'empirical' | 'architectural' | 'preference';
+  stakes?: 'low' | 'medium' | 'high';
+  costCapUsd?: number;
+  maxRounds?: number;
+}
+
 export interface BotsJsonNewFormat {
   feishuBots?: FeishuBotJsonEntry[];
   telegramBots?: TelegramBotJsonEntry[];
   webBots?: WebBotJsonEntry[];
   wechatBots?: WechatBotJsonEntry[];
   peers?: PeerJsonEntry[];
+  consensusProfiles?: Record<string, ConsensusProfileJsonEntry>;
+}
+
+function normalizeConsensusProfiles(
+  raw?: Record<string, ConsensusProfileJsonEntry>,
+): Record<string, ConsensusProfileConfig> {
+  if (!raw) return {};
+  const validTypes = new Set(['empirical', 'architectural', 'preference']);
+  const validStakes = new Set(['low', 'medium', 'high']);
+  const profiles: Record<string, ConsensusProfileConfig> = {};
+  for (const [name, profile] of Object.entries(raw)) {
+    const panelists = profile.panelists ?? profile.bots;
+    if (
+      !Array.isArray(panelists) ||
+      panelists.length === 0 ||
+      !panelists.every((b) => typeof b === 'string' && b.trim())
+    ) {
+      throw new Error(`Invalid consensusProfiles.${name}: panelists must be a non-empty string array`);
+    }
+    if (profile.type && !validTypes.has(profile.type)) {
+      throw new Error(`Invalid consensusProfiles.${name}.type: ${profile.type}`);
+    }
+    if (profile.stakes && !validStakes.has(profile.stakes)) {
+      throw new Error(`Invalid consensusProfiles.${name}.stakes: ${profile.stakes}`);
+    }
+    if (profile.costCapUsd !== undefined && (!Number.isFinite(profile.costCapUsd) || profile.costCapUsd < 0)) {
+      throw new Error(`Invalid consensusProfiles.${name}.costCapUsd: must be a non-negative number`);
+    }
+    if (profile.maxRounds !== undefined && (!Number.isInteger(profile.maxRounds) || profile.maxRounds < 1)) {
+      throw new Error(`Invalid consensusProfiles.${name}.maxRounds: must be a positive integer`);
+    }
+    profiles[name] = {
+      panelists: panelists.map((b) => b.trim()),
+      ...(typeof profile.synthesizerBot === 'string' && profile.synthesizerBot.trim()
+        ? { synthesizerBot: profile.synthesizerBot.trim() }
+        : {}),
+      ...(profile.type ? { type: profile.type } : {}),
+      ...(profile.stakes ? { stakes: profile.stakes } : {}),
+      ...(typeof profile.costCapUsd === 'number' ? { costCapUsd: profile.costCapUsd } : {}),
+      ...(typeof profile.maxRounds === 'number' ? { maxRounds: profile.maxRounds } : {}),
+    };
+  }
+  return profiles;
 }
 
 export function loadAppConfig(): AppConfig {
@@ -535,6 +669,7 @@ export function loadAppConfig(): AppConfig {
   let telegramBots: TelegramBotConfig[] = [];
   let webBots: BotConfigBase[] = [];
   let wechatBots: WechatBotConfig[] = [];
+  let consensusProfiles: Record<string, ConsensusProfileConfig> = {};
   let parsedConfig: unknown;
 
   if (botsConfigPath) {
@@ -564,6 +699,7 @@ export function loadAppConfig(): AppConfig {
       if (cfg.wechatBots) {
         wechatBots = cfg.wechatBots.map(wechatBotFromJson);
       }
+      consensusProfiles = normalizeConsensusProfiles(cfg.consensusProfiles);
       if (feishuBots.length === 0 && telegramBots.length === 0 && webBots.length === 0 && wechatBots.length === 0) {
         throw new Error(`BOTS_CONFIG file must define at least one bot: ${resolved}`);
       }
@@ -582,11 +718,17 @@ export function loadAppConfig(): AppConfig {
       wechatBots = [wechatBotFromEnv()];
     }
     if (feishuBots.length === 0 && telegramBots.length === 0 && wechatBots.length === 0) {
-      throw new Error('No bot configured. Set FEISHU_APP_ID/FEISHU_APP_SECRET, TELEGRAM_BOT_TOKEN, or WECHAT_ILINK_ENABLED=true, or use BOTS_CONFIG for multi-bot mode.');
+      throw new Error(
+        'No bot configured. Set FEISHU_APP_ID/FEISHU_APP_SECRET, TELEGRAM_BOT_TOKEN, or WECHAT_ILINK_ENABLED=true, or use BOTS_CONFIG for multi-bot mode.',
+      );
     }
   }
 
-  const memoryServerUrl = (process.env.META_MEMORY_URL || process.env.MEMORY_SERVER_URL || 'http://localhost:8100').replace(/\/+$/, '');
+  const memoryServerUrl = (
+    process.env.META_MEMORY_URL ||
+    process.env.MEMORY_SERVER_URL ||
+    'http://localhost:8100'
+  ).replace(/\/+$/, '');
 
   const apiPort = process.env.API_PORT ? parseInt(process.env.API_PORT, 10) : 9100;
   const apiSecret = process.env.API_SECRET || undefined;
@@ -629,7 +771,9 @@ export function loadAppConfig(): AppConfig {
     }
   }
   if (process.env.METABOT_PEERS) {
-    const urls = process.env.METABOT_PEERS.split(',').map((u) => u.trim()).filter(Boolean);
+    const urls = process.env.METABOT_PEERS.split(',')
+      .map((u) => u.trim())
+      .filter(Boolean);
     const secrets = (process.env.METABOT_PEER_SECRETS || '').split(',').map((s) => s.trim());
     const names = (process.env.METABOT_PEER_NAMES || '').split(',').map((s) => s.trim());
     for (let i = 0; i < urls.length; i++) {
@@ -646,6 +790,7 @@ export function loadAppConfig(): AppConfig {
     telegramBots,
     webBots,
     wechatBots,
+    consensusProfiles,
     feishuService,
     log: {
       level: process.env.LOG_LEVEL || 'info',

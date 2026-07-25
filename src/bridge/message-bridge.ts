@@ -20,6 +20,8 @@ import { metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 import { buildIncrementalContext } from '../feishu/group-context.js';
 import { splitProcessConclusion } from '../feishu/card-builder.js';
+import { codexAppServerEnabled } from '../engines/codex/app-server-client.js';
+import { startIdleWatchdog } from './idle-watchdog.js';
 
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes for user to answer
@@ -61,6 +63,7 @@ interface PendingBatch {
 interface RunningTask {
   abortController: AbortController;
   startTime: number;
+  userId: string;
   executionHandle: ExecutionHandle;
   pendingQuestion: PendingQuestion | null;
   /** Index of the question currently being displayed within pendingQuestion.questions */
@@ -217,6 +220,97 @@ export class MessageBridge {
     return entry.executor;
   }
 
+  private isCodexAppServerChat(chatId: string): boolean {
+    const session = this.sessionManager.getSession(chatId);
+    const engineName: EngineName = session.engine ?? resolveEngineName(this.config);
+    return engineName === 'codex' && codexAppServerEnabled(this.config.codex);
+  }
+
+  private codexAppServerQuestionError(): string {
+    return [
+      'Codex app-server transport does not support MetaBot interactive questions yet.',
+      'The task was stopped before waiting for an answer to avoid leaving the session in an unsupported state.',
+    ].join(' ');
+  }
+
+  private parseDeepResearchCommand(text: string): string | null {
+    const trimmed = text.trim();
+    const match = trimmed.match(/^\/dr(?:@\S+)?(?:\s+([\s\S]*))?$/i);
+    if (!match) return null;
+    return (match[1] || '').trim();
+  }
+
+  private buildDeepResearchCommandPrompt(question: string): string {
+    return [
+      '[MetaBot /dr Deep Research Command]',
+      '',
+      'The user invoked /dr. Start the Deep Research GUI SOP immediately.',
+      'Do not answer from your own knowledge and do not use ordinary ChatGPT as a substitute.',
+      '',
+      'Mandatory workflow:',
+      '1. Use the deep-research-gui skill. If the skill is not auto-loaded, read /root/.codex/skills/deep-research-gui/SKILL.md and follow it exactly.',
+      '2. Run Stage 0 through Stage 5 in order: preflight, new-job, submit true Deep Research, screenshot visual poll, export Copy contents, verify delivery.',
+      '3. Do not use Mac OCR or Mac Vision OCR for completion detection.',
+      '4. Do not resubmit if submit_unverified or invalid_not_deep_research appears.',
+      '5. Put exported report files in /tmp/metabot-outputs-root for this chat, as instructed by the runtime.',
+      '',
+      'User-visible progress updates are mandatory. Send short updates in this format:',
+      'Deep Research Step 1/6 - Preflight',
+      'Deep Research Step 2/6 - Create job',
+      'Deep Research Step 3/6 - Submit true Deep Research',
+      'Deep Research Step 4/6 - Visual polling',
+      'Deep Research Step 5/6 - Export report',
+      'Deep Research Step 6/6 - Verify and deliver',
+      '',
+      'Final response must include total elapsed time, per-stage elapsed time, completion screenshot path, and exported report path.',
+      '',
+      'Research question:',
+      question,
+    ].join('\n');
+  }
+
+  private async handleDeepResearchCommand(msg: IncomingMessage): Promise<boolean> {
+    const question = this.parseDeepResearchCommand(msg.text);
+    if (question === null) return false;
+
+    if (!question) {
+      await this.sender.sendTextNotice(
+        msg.chatId,
+        '🔎 Deep Research',
+        'Usage: `/dr <research question>`',
+        'blue',
+      );
+      return true;
+    }
+
+    if (this.runningTasks.has(msg.chatId)) {
+      await this.sender.sendTextNotice(
+        msg.chatId,
+        '⏳ Deep Research',
+        'A task is already running in this chat. Use `/stop` to abort it, or wait for it to finish.',
+        'orange',
+      );
+      return true;
+    }
+
+    await this.sender.sendTextNotice(
+      msg.chatId,
+      '🔎 Deep Research',
+      [
+        'Command accepted.',
+        'Deep Research Step 1/6 - Preflight will start now.',
+        'I will report each stage as it progresses.',
+      ].join('\n'),
+      'blue',
+    );
+
+    await this.executeQuery({
+      ...msg,
+      text: this.buildDeepResearchCommandPrompt(question),
+    });
+    return true;
+  }
+
   /**
    * Handle /compact — trigger Claude Code's native compaction on the chat's
    * session via the standalone CLI (SDK 0.3 query() no longer parses the slash
@@ -265,6 +359,15 @@ export class MessageBridge {
   /** Inject the doc sync service for /sync commands. */
   setDocSync(docSync: DocSync): void {
     this.commandHandler.setDocSync(docSync);
+  }
+
+  setScheduleStopper(
+    stopSchedulesForChat: (chatId: string) => {
+      activeCount: number;
+      paused: Array<{ id: string; label?: string; cronExpr: string }>;
+    },
+  ): void {
+    this.commandHandler.setScheduleStopper(stopSchedulesForChat);
   }
 
   /** Inject the session registry for cross-platform session sync. */
@@ -386,6 +489,8 @@ export class MessageBridge {
         await this.handleCompact(chatId);
         return;
       }
+
+      if (await this.handleDeepResearchCommand(msg)) return;
 
       const handled = await this.commandHandler.handle(msg);
       if (handled) return;
@@ -774,6 +879,7 @@ export class MessageBridge {
     const displayPrompt = hasMedia && mediaCount > 1
       ? `🖼️ [${mediaCount} files] ${text}`
       : fileKey ? '📎 ' + text : imageKey ? '🖼️ ' + text : text;
+    const goalInvocation = this.parseCodexGoalInvocation(prompt);
     const processor = new StreamProcessor(displayPrompt);
     const initialState: CardState = {
       status: 'thinking',
@@ -808,17 +914,24 @@ export class MessageBridge {
     // last spoke). Empty string when no increment exists (same bot continuing
     // its own conversation) — zero token overhead in the common case.
     const groupCtx = buildIncrementalContext(chatId, this.config.name, this.logger);
-    if (groupCtx) prompt = groupCtx + '\n' + prompt;
+    if (groupCtx) {
+      if (goalInvocation) {
+        goalInvocation.objective = `${goalInvocation.objective}\n\n## Recent Group Context\n${groupCtx}`;
+      } else {
+        prompt = groupCtx + '\n' + prompt;
+      }
+    }
 
     // Start multi-turn execution
     const executionHandle = this.executorForChat(chatId).startExecution({
-      prompt,
+      prompt: goalInvocation?.objective ?? prompt,
       cwd,
       sessionId: session.sessionId,
       abortController,
       outputsDir,
       apiContext,
       model: session.model,
+      ...(goalInvocation ? { codexGoal: goalInvocation } : {}),
     });
 
     const rateLimiter = new RateLimiter(1500);
@@ -828,6 +941,7 @@ export class MessageBridge {
     const runningTask: RunningTask = {
       abortController,
       startTime,
+      userId,
       executionHandle,
       pendingQuestion: null,
       currentQuestionIndex: 0,
@@ -853,25 +967,27 @@ export class MessageBridge {
       abortController.abort();
     }, TASK_TIMEOUT_MS);
 
-    // Idle detection: reset timer on every stream message
-    let idleTimerId: ReturnType<typeof setTimeout> | undefined;
-    const resetIdleTimer = () => {
-      if (idleTimerId) clearTimeout(idleTimerId);
-      idleTimerId = setTimeout(() => {
+    // Idle detection considers both surfaced messages and low-level engine
+    // activity. Codex can stay busy on tool events that its JSONL translator
+    // intentionally does not render into the Feishu card.
+    const idleWatchdog = startIdleWatchdog({
+      timeoutMs: IDLE_TIMEOUT_MS,
+      getExternalActivityAt: () => runningTask.executionHandle.getLastActivityAt?.(),
+      onIdle: () => {
         this.logger.warn({ chatId, userId }, 'Task idle timeout (1h no stream), aborting');
         idledOut = true;
-        executionHandle.finish();
+        runningTask.executionHandle.finish();
         abortController.abort();
-      }, IDLE_TIMEOUT_MS);
-    };
-    resetIdleTimer();
+      },
+    });
+    const resetIdleTimer = () => idleWatchdog.markActivity();
 
     let lastState: CardState = initialState;
 
     try {
       for await (const message of executionHandle.stream) {
         if (abortController.signal.aborted) break;
-        resetIdleTimer();
+        if (message.type !== 'engine_heartbeat') resetIdleTimer();
 
         const state = processor.processMessage(message);
         lastState = state;
@@ -884,6 +1000,16 @@ export class MessageBridge {
 
         // Check if we hit a waiting_for_input state
         if (state.status === 'waiting_for_input' && state.pendingQuestion) {
+          if (this.isCodexAppServerChat(chatId)) {
+            const errorMessage = this.codexAppServerQuestionError();
+            this.logger.warn({ chatId }, 'Codex app-server emitted an unsupported interactive question');
+            processor.clearPendingQuestion();
+            runningTask.pendingQuestion = null;
+            lastState = { ...state, status: 'error', pendingQuestion: undefined, errorMessage };
+            executionHandle.finish();
+            break;
+          }
+
           // Only initialize tracking when we see a NEW question call
           if (!runningTask.pendingQuestion || runningTask.pendingQuestion.toolUseId !== state.pendingQuestion.toolUseId) {
             runningTask.pendingQuestion = state.pendingQuestion;
@@ -991,7 +1117,7 @@ export class MessageBridge {
 
         for await (const message of retryHandle.stream) {
           if (abortController.signal.aborted) break;
-          resetIdleTimer();
+          if (message.type !== 'engine_heartbeat') resetIdleTimer();
           const state = processor.processMessage(message);
           lastState = state;
           const newSid = processor.getSessionId();
@@ -1017,7 +1143,7 @@ export class MessageBridge {
 
         for await (const message of retryHandle.stream) {
           if (abortController.signal.aborted) break;
-          resetIdleTimer();
+          if (message.type !== 'engine_heartbeat') resetIdleTimer();
           const state = processor.processMessage(message);
           lastState = state;
           const newSid = processor.getSessionId();
@@ -1088,7 +1214,7 @@ export class MessageBridge {
 
           for await (const message of retryHandle.stream) {
             if (abortController.signal.aborted) break;
-            resetIdleTimer();
+            if (message.type !== 'engine_heartbeat') resetIdleTimer();
             const state = processor.processMessage(message);
             lastState = state;
             const newSid = processor.getSessionId();
@@ -1151,7 +1277,7 @@ export class MessageBridge {
       await this.sendFinalCard(messageId, errorState, chatId);
     } finally {
       clearTimeout(timeoutId);
-      if (idleTimerId) clearTimeout(idleTimerId);
+      idleWatchdog.stop();
       if (runningTask.questionTimeoutId) {
         clearTimeout(runningTask.questionTimeoutId);
       }
@@ -1173,6 +1299,22 @@ export class MessageBridge {
       }
       try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
     }
+  }
+
+  private parseCodexGoalInvocation(prompt: string): { objective: string; tokenBudget?: number | null } | undefined {
+    const trimmed = prompt.trimStart();
+    if (!trimmed.toLowerCase().startsWith('/goal')) return undefined;
+    const afterCommand = trimmed.slice('/goal'.length);
+    if (afterCommand && !/^\s/.test(afterCommand)) return undefined;
+    let args = afterCommand.trim();
+    if (args.toLowerCase().startsWith('set ')) args = args.slice(4).trim();
+    const budgetMatch = args.match(/\s+--budget\s+(\d+)\s*$/);
+    const objective = budgetMatch ? args.slice(0, budgetMatch.index).trim() : args.trim();
+    if (!objective) return undefined;
+    return {
+      objective,
+      ...(budgetMatch ? { tokenBudget: Number.parseInt(budgetMatch[1], 10) } : {}),
+    };
   }
 
   /**
@@ -1237,6 +1379,7 @@ export class MessageBridge {
     const runningTask: RunningTask = {
       abortController,
       startTime,
+      userId,
       executionHandle,
       pendingQuestion: null,
       currentQuestionIndex: 0,
@@ -1261,17 +1404,17 @@ export class MessageBridge {
       abortController.abort();
     }, TASK_TIMEOUT_MS);
 
-    let idleTimerId: ReturnType<typeof setTimeout> | undefined;
-    const resetIdleTimer = () => {
-      if (idleTimerId) clearTimeout(idleTimerId);
-      idleTimerId = setTimeout(() => {
+    const idleWatchdog = startIdleWatchdog({
+      timeoutMs: IDLE_TIMEOUT_MS,
+      getExternalActivityAt: () => runningTask.executionHandle.getLastActivityAt?.(),
+      onIdle: () => {
         this.logger.warn({ chatId, userId }, 'API task idle timeout (1h no stream), aborting');
         idledOut = true;
-        executionHandle.finish();
+        runningTask.executionHandle.finish();
         abortController.abort();
-      }, IDLE_TIMEOUT_MS);
-    };
-    resetIdleTimer();
+      },
+    });
+    const resetIdleTimer = () => idleWatchdog.markActivity();
 
     let lastState: CardState = {
       status: 'thinking',
@@ -1283,7 +1426,7 @@ export class MessageBridge {
     try {
       for await (const message of executionHandle.stream) {
         if (abortController.signal.aborted) break;
-        resetIdleTimer();
+        if (message.type !== 'engine_heartbeat') resetIdleTimer();
 
         const state = processor.processMessage(message);
         lastState = state;
@@ -1294,6 +1437,16 @@ export class MessageBridge {
         }
 
         if (state.status === 'waiting_for_input' && state.pendingQuestion) {
+          if (this.isCodexAppServerChat(chatId)) {
+            const errorMessage = this.codexAppServerQuestionError();
+            this.logger.warn({ chatId }, 'API task: Codex app-server emitted an unsupported interactive question');
+            processor.clearPendingQuestion();
+            runningTask.pendingQuestion = null;
+            lastState = { ...state, status: 'error', pendingQuestion: undefined, errorMessage };
+            executionHandle.finish();
+            break;
+          }
+
           const pending = state.pendingQuestion;
           if (options.onQuestion) {
             // Notify the caller about the question state
@@ -1373,7 +1526,7 @@ export class MessageBridge {
 
         for await (const message of retryHandle.stream) {
           if (abortController.signal.aborted) break;
-          resetIdleTimer();
+          if (message.type !== 'engine_heartbeat') resetIdleTimer();
           const state = processor.processMessage(message);
           lastState = state;
           const newSid = processor.getSessionId();
@@ -1451,7 +1604,7 @@ export class MessageBridge {
 
           for await (const message of retryHandle.stream) {
             if (abortController.signal.aborted) break;
-            resetIdleTimer();
+            if (message.type !== 'engine_heartbeat') resetIdleTimer();
             const state = processor.processMessage(message);
             lastState = state;
             const newSid = processor.getSessionId();
@@ -1523,7 +1676,7 @@ export class MessageBridge {
       };
     } finally {
       clearTimeout(timeoutId);
-      if (idleTimerId) clearTimeout(idleTimerId);
+      idleWatchdog.stop();
       try { executionHandle.finish(); } catch (e) { this.logger.warn({ err: e, chatId }, 'Error finishing execution handle'); }
       this.runningTasks.delete(chatId);
       metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
@@ -1882,4 +2035,3 @@ export function isContextOverflowError(errorMessage?: string): boolean {
   if (!errorMessage) return false;
   return /context.window.exceeds.limit|context.length.exceeded|context.too.long|max.context.length|token.limit.exceeded|maximum.context/i.test(errorMessage);
 }
-

@@ -63,32 +63,192 @@ print(json.dumps(out))
     subcmd="${1:-help}"; shift 2>/dev/null || true
     case "$subcmd" in
       start)
-        bots="${1:-}"; problem="${2:-}"; type_="${3:-architectural}"; stakes="${4:-medium}"
-        # Optional 5th + 6th positional: chatId + callerBot for group visibility.
-        # When set, each consensus phase emits a card into <chatId> as
-        # <callerBot> so the user can watch the inter-bot dialogue live.
-        consensus_chat="${5:-}"; consensus_caller="${6:-}"
-        if [[ -z "$bots" || -z "$problem" ]]; then
-          echo "Usage: mb consensus start <bot1,bot2,...> <problem> [type] [stakes] [chatId] [callerBot]"
-          echo "  bots:       comma-separated, 2-4 bots (e.g. quatumtrading-claude,gemini)"
+        consensus_profile=""
+        bots=""
+        problem=""
+        type_=""
+        stakes=""
+        consensus_chat=""
+        consensus_caller=""
+        consensus_synth=""
+        cost_cap=""
+        max_rounds=""
+        positionals=()
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --profile)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --profile"; exit 1; fi
+              consensus_profile="${2:-}"; shift 2 ;;
+            --chat)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --chat"; exit 1; fi
+              consensus_chat="${2:-}"; shift 2 ;;
+            --caller)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --caller"; exit 1; fi
+              consensus_caller="${2:-}"; shift 2 ;;
+            --synthesizer)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --synthesizer"; exit 1; fi
+              consensus_synth="${2:-}"; shift 2 ;;
+            --type)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --type"; exit 1; fi
+              type_="${2:-}"; shift 2 ;;
+            --stakes)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --stakes"; exit 1; fi
+              stakes="${2:-}"; shift 2 ;;
+            --cost-cap)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --cost-cap"; exit 1; fi
+              cost_cap="${2:-}"; shift 2 ;;
+            --max-rounds)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --max-rounds"; exit 1; fi
+              max_rounds="${2:-}"; shift 2 ;;
+            *)
+              positionals+=("$1"); shift ;;
+          esac
+        done
+        tail_start=0
+        if [[ -n "$consensus_profile" ]]; then
+          if [[ ${#positionals[@]} -ge 2 && "${positionals[0]}" == *,* ]]; then
+            bots="${positionals[0]}"
+            problem="${positionals[1]}"
+            tail_start=2
+          else
+            problem="${positionals[0]:-}"
+            tail_start=1
+          fi
+        else
+          bots="${positionals[0]:-}"
+          problem="${positionals[1]:-}"
+          tail_start=2
+        fi
+        if [[ -z "$type_" ]]; then
+          candidate="${positionals[$tail_start]:-}"
+          case "$candidate" in
+            empirical|architectural|preference)
+              type_="$candidate"; tail_start=$((tail_start + 1)) ;;
+            *)
+              type_="architectural" ;;
+          esac
+        fi
+        if [[ -z "$stakes" ]]; then
+          candidate="${positionals[$tail_start]:-}"
+          case "$candidate" in
+            low|medium|high)
+              stakes="$candidate"; tail_start=$((tail_start + 1)) ;;
+            *)
+              stakes="medium" ;;
+          esac
+        fi
+        [[ -z "$consensus_chat" ]] && consensus_chat="${positionals[$tail_start]:-}" && tail_start=$((tail_start + 1))
+        [[ -z "$consensus_caller" ]] && consensus_caller="${positionals[$tail_start]:-}" && tail_start=$((tail_start + 1))
+        [[ -z "$consensus_synth" ]] && consensus_synth="${positionals[$tail_start]:-}" && tail_start=$((tail_start + 1))
+        if [[ -n "${positionals[$tail_start]:-}" ]]; then
+          echo "Unexpected argument: ${positionals[$tail_start]}"
+          echo "Usage: mb consensus start [--profile name] [bot1,bot2,...] <problem> [type] [stakes] [chatId] [callerBot] [synthesizerBot]"
+          exit 1
+        fi
+        if [[ -z "$problem" || ( -z "$bots" && -z "$consensus_profile" ) ]]; then
+          echo "Usage: mb consensus start [--profile name] [bot1,bot2,...] <problem> [type] [stakes] [chatId] [callerBot] [synthesizerBot]"
+          echo "  bots:       comma-separated, 2-4 bots (e.g. project-alpha,project-beta)"
+          echo "  profile:    optional named consensus profile from bots.json"
           echo "  type:       empirical | architectural (default) | preference"
           echo "  stakes:     low | medium (default) | high"
           echo "  chatId:     optional — group chatId to surface event cards"
           echo "  callerBot:  optional (required if chatId set) — bot identity"
-          echo "              used to post the cards (e.g. quatumtrading-claude)"
+          echo "              used to post the cards (e.g. project-alpha)"
+          echo "  synthesizerBot: optional non-panelist bot for Phase 4 synthesis"
           exit 1
         fi
         python3 -c "
 import json, sys
-bots_list = sys.argv[1].split(',')
-out = {'bots': bots_list, 'problem': sys.argv[2], 'type': sys.argv[3], 'stakes': sys.argv[4]}
-if sys.argv[5]:
-    out['chatId'] = sys.argv[5]
+out = {'problem': sys.argv[3], 'type': sys.argv[4], 'stakes': sys.argv[5]}
+if sys.argv[1]:
+    out['profile'] = sys.argv[1]
+if sys.argv[2]:
+    out['bots'] = sys.argv[2].split(',')
 if sys.argv[6]:
-    out['callerBotName'] = sys.argv[6]
+    out['chatId'] = sys.argv[6]
+if sys.argv[7]:
+    out['callerBotName'] = sys.argv[7]
+if sys.argv[8]:
+    out['synthesizerBot'] = sys.argv[8]
+if sys.argv[9]:
+    out['costCapUsd'] = float(sys.argv[9])
+if sys.argv[10]:
+    out['maxRounds'] = int(sys.argv[10])
 print(json.dumps(out))
-" "$bots" "$problem" "$type_" "$stakes" "$consensus_chat" "$consensus_caller" | \
+" "$consensus_profile" "$bots" "$problem" "$type_" "$stakes" "$consensus_chat" "$consensus_caller" "$consensus_synth" "$cost_cap" "$max_rounds" | \
         curl -s -X POST "$METABOT_URL/api/consensus" \
+          -H "$METABOT_AUTH" -H "Content-Type: application/json" \
+          -d @- | _json
+        ;;
+      profiles|profile|ls)
+        curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/consensus/profiles" | _json
+        ;;
+      doctor|dry-run)
+        dry_run="false"
+        [[ "$subcmd" == "dry-run" ]] && dry_run="true"
+        consensus_profile=""
+        bots=""
+        consensus_chat=""
+        consensus_caller=""
+        consensus_synth=""
+        type_=""
+        stakes=""
+        positionals=()
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --profile)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --profile"; exit 1; fi
+              consensus_profile="${2:-}"; shift 2 ;;
+            --chat)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --chat"; exit 1; fi
+              consensus_chat="${2:-}"; shift 2 ;;
+            --caller)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --caller"; exit 1; fi
+              consensus_caller="${2:-}"; shift 2 ;;
+            --synthesizer)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --synthesizer"; exit 1; fi
+              consensus_synth="${2:-}"; shift 2 ;;
+            --type)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --type"; exit 1; fi
+              type_="${2:-}"; shift 2 ;;
+            --stakes)
+              if [[ -z "${2:-}" ]]; then echo "Missing value for --stakes"; exit 1; fi
+              stakes="${2:-}"; shift 2 ;;
+            *)
+              positionals+=("$1"); shift ;;
+          esac
+        done
+        if [[ ${#positionals[@]} -gt 0 ]]; then
+          if [[ "${positionals[0]}" == *,* ]]; then
+            bots="${positionals[0]}"
+            [[ -z "$consensus_chat" ]] && consensus_chat="${positionals[1]:-}"
+            [[ -z "$consensus_caller" ]] && consensus_caller="${positionals[2]:-}"
+          else
+            [[ -z "$consensus_profile" ]] && consensus_profile="${positionals[0]}"
+            [[ -z "$consensus_chat" ]] && consensus_chat="${positionals[1]:-}"
+            [[ -z "$consensus_caller" ]] && consensus_caller="${positionals[2]:-}"
+          fi
+        fi
+        python3 -c "
+import json, sys
+out = {'dryRun': sys.argv[8] == 'true'}
+if sys.argv[1]:
+    out['profile'] = sys.argv[1]
+if sys.argv[2]:
+    out['bots'] = sys.argv[2].split(',')
+if sys.argv[3]:
+    out['chatId'] = sys.argv[3]
+if sys.argv[4]:
+    out['callerBotName'] = sys.argv[4]
+if sys.argv[5]:
+    out['synthesizerBot'] = sys.argv[5]
+if sys.argv[6]:
+    out['type'] = sys.argv[6]
+if sys.argv[7]:
+    out['stakes'] = sys.argv[7]
+print(json.dumps(out))
+" "$consensus_profile" "$bots" "$consensus_chat" "$consensus_caller" "$consensus_synth" "$type_" "$stakes" "$dry_run" | \
+        curl -s -X POST "$METABOT_URL/api/consensus/doctor" \
           -H "$METABOT_AUTH" -H "Content-Type: application/json" \
           -d @- | _json
         ;;
@@ -102,7 +262,10 @@ print(json.dumps(out))
         ;;
       *)
         echo "Usage:"
-        echo "  mb consensus start <bot1,bot2,...> <problem> [type] [stakes]"
+        echo "  mb consensus start [--profile name] [bot1,bot2,...] <problem> [type] [stakes] [chatId] [callerBot] [synthesizerBot]"
+        echo "  mb consensus profiles"
+        echo "  mb consensus doctor [profile|bot1,bot2,...] [chatId] [callerBot]"
+        echo "  mb consensus dry-run [profile|bot1,bot2,...] [chatId] [callerBot]"
         echo "  mb consensus get <taskId>"
         exit 1
         ;;

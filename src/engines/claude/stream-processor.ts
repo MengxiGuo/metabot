@@ -3,6 +3,7 @@ import type {
   BackgroundEvent,
   BackgroundTaskStatus,
   CardState,
+  GoalProgress,
   ToolCall,
   PendingQuestion,
 } from '../../feishu/card-builder.js';
@@ -53,10 +54,18 @@ export class StreamProcessor {
   private _model: string | undefined;
   private _totalTokens: number | undefined;
   private _contextWindow: number | undefined;
-  private _quotaInfo: { usedPct: number; hoursToReset: number; secondary?: { usedPct: number; hoursToReset: number } } | undefined;
+  private _quotaInfo: {
+    usedPct: number;
+    hoursToReset: number;
+    label?: string;
+    secondary?: { usedPct: number; hoursToReset: number; label?: string };
+    tertiary?: { usedPct: number; hoursToReset: number; label?: string };
+  } | undefined;
   // Track per-API-call usage from stream events for accurate context window display
   private _lastInputTokens: number | undefined;
   private _lastOutputTokens: number | undefined;
+  private _goalProgress: GoalProgress | undefined;
+  private _engineActive = false;
   // Live background tasks (Monitor, etc.) — task_id → latest rollup.
   private _backgroundEvents: Map<string, BackgroundEvent> = new Map();
 
@@ -80,6 +89,12 @@ export class StreamProcessor {
     // Capture session_id from any message
     if (message.session_id) {
       this.sessionId = message.session_id;
+    }
+    if (message.goalProgress) {
+      this._goalProgress = {
+        ...this._goalProgress,
+        ...message.goalProgress,
+      };
     }
 
     switch (message.type) {
@@ -108,13 +123,19 @@ export class StreamProcessor {
 
       case 'tool_use_summary':
         break;
+
+      case 'engine_activity':
+      case 'engine_heartbeat':
+        this._engineActive = true;
+        if (message.duration_ms !== undefined) this.durationMs = message.duration_ms;
+        break;
     }
 
     // Determine running status
     const hasActiveTools = this.toolCalls.some((t) => t.status === 'running');
     const status = this._pendingQuestions.length > 0
       ? 'waiting_for_input'
-      : hasActiveTools ? 'running' : this.responseText ? 'running' : 'thinking';
+      : hasActiveTools || this._engineActive ? 'running' : this.responseText ? 'running' : 'thinking';
 
     return {
       status,
@@ -124,6 +145,7 @@ export class StreamProcessor {
       costUsd: this.costUsd,
       durationMs: this.durationMs,
       pendingQuestion: this._pendingQuestions[0] || undefined,
+      goalProgress: this._goalProgress,
       backgroundEvents: this._backgroundEvents.size > 0
         ? [...this._backgroundEvents.values()]
         : undefined,
@@ -340,6 +362,7 @@ export class StreamProcessor {
       totalTokens: this._totalTokens,
       contextWindow: this._contextWindow,
       quotaInfo: this._quotaInfo,
+      goalProgress: this._goalProgress,
       backgroundEvents: this._backgroundEvents.size > 0
         ? [...this._backgroundEvents.values()]
         : undefined,
@@ -437,6 +460,7 @@ export class StreamProcessor {
       costUsd: this.costUsd,
       durationMs: this.durationMs,
       pendingQuestion: this._pendingQuestions[0] || undefined,
+      goalProgress: this._goalProgress,
       backgroundEvents: this._backgroundEvents.size > 0
         ? [...this._backgroundEvents.values()]
         : undefined,

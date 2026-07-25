@@ -18,6 +18,7 @@ import type { WebSocketHandle } from '../../web/ws-server.js';
 import type { SessionRegistry } from '../../session/session-registry.js';
 import type { ActivityStore } from '../activity-store.js';
 import type { SkillHubStore } from '../skill-hub-store.js';
+import type { ConsensusProfileConfig } from '../../config.js';
 
 export interface RouteContext {
   registry: BotRegistry;
@@ -41,6 +42,7 @@ export interface RouteContext {
   sessionRegistry?: SessionRegistry;
   activityStore?: ActivityStore;
   skillHubStore?: SkillHubStore;
+  consensusProfiles?: Record<string, ConsensusProfileConfig>;
 }
 
 /**

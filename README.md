@@ -76,7 +76,7 @@ MetaBot 不是只绑定一家 — 四大顶级 AI 编码 Agent 都内置原生�
 { "name": "piccolo","engine": "gemini", "gemini": { "model": "gemini-3.1-pro-preview", "approvalMode": "yolo" } }
 ```
 
-Codex 支持通过本机 `codex exec --json` CLI 接入，并使用 `codex exec resume` 续接聊天会话。启动 MetaBot 前，请先执行 `codex login` 或配置好 Codex API key/profile。
+Codex 默认支持通过本机 `codex exec --json` CLI 接入，并使用 `codex exec resume` 续接聊天会话。若需要官方 `/goal` 模式，把 bot 配置里的 `codex.transport` 设为 `"app-server"`；MetaBot 会走 `codex app-server` 的官方 thread/turn/goal JSON-RPC，而不是伪造自己的 goal 状态。`app-server` 路径比 `exec` 更新，建议先在单个 bot 上验证后再放量。启动 MetaBot 前，请先执行 `codex login` 或配置好 Codex API key/profile。
 
 Gemini 引擎使用 `gemini` CLI（`npm i -g @google/gemini-cli` 后执行 `gemini` 一次完成浏览器 OAuth），quota footer 数据直接读 `~/.gemini/oauth_creds.json` 调 Google Code Assist API。详细配置见 [FORK.md](FORK.md)。
 
@@ -114,7 +114,7 @@ Gemini 引擎使用 `gemini` CLI（`npm i -g @google/gemini-cli` 后执行 `gemi
 ```
 飞书/TG/微信 → IM Bridge → Engine Router ──┬─→ Claude Code Agent SDK
                                             ├─→ Kimi Agent SDK（@moonshot-ai/kimi-agent-sdk）
-                                            └─→ Codex CLI（codex exec --json 子进程）
+                                            └─→ Codex CLI（codex exec 或 app-server 子进程）
                               ↕
                     MetaMemory（共享知识库）
                     MetaSkill（Agent 工厂，产出 CLAUDE.md + AGENTS.md）

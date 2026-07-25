@@ -7,6 +7,16 @@ function msg(overrides: Partial<SDKMessage>): SDKMessage {
 }
 
 describe('StreamProcessor', () => {
+  it('shows quiet engine heartbeats as running without adding visible content', () => {
+    const p = new StreamProcessor('long goal');
+    const state = p.processMessage(msg({ type: 'engine_heartbeat', duration_ms: 120_000 }));
+
+    expect(state.status).toBe('running');
+    expect(state.responseText).toBe('');
+    expect(state.toolCalls).toEqual([]);
+    expect(state.durationMs).toBe(120_000);
+  });
+
   it('starts in thinking status', () => {
     const p = new StreamProcessor('hello');
     const state = p.processMessage(msg({ type: 'system', session_id: 'sess-1' }));

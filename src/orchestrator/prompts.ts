@@ -178,13 +178,18 @@ export function buildPhase4SynthesizerPrompt(
     .map((f) => `- ${f.bot} re: ${f.disagreementTarget}`)
     .join('\n');
 
+  const isPanelistSynthesizer = takes.some((t) => t.bot === synthesizerBot);
+  const roleExplanation = isPanelistSynthesizer
+    ? 'designated Synthesizer (chosen via Falsification-Weighted queue: most-critiqued panelist first, to force you to confront others\' issues rather than dismiss them)'
+    : 'designated synthesizer-only reviewer. You did not write a Phase 1 take; your job is to synthesize the panelists without adding a new hidden panelist position';
+
   const forkNotice = isForkAttempt
     ? '\n\n⚠️ **FORK ATTEMPT**: a previous Synthesizer\'s candidate was rejected. You are now in charge. Address what the previous candidate missed. Do not just defend your own original view — produce a *unified* candidate or honestly surface unresolvable dissent.'
     : '';
 
   return `# Consensus Protocol — Phase 4: Synthesis
 
-You are **${synthesizerBot}**, designated Synthesizer (chosen via Falsification-Weighted queue: most-critiqued bot first, to force you to confront others' issues rather than dismiss them).${forkNotice}
+You are **${synthesizerBot}**, ${roleExplanation}.${forkNotice}
 
 ## Problem
 ${problem}

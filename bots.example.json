@@ -63,6 +63,16 @@
       "defaultWorkingDirectory": "/home/user/project"
     }
   ],
+  "consensusProfiles": {
+    "default": {
+      "panelists": ["project-alpha", "project-beta", "project-gamma"],
+      "synthesizerBot": "project-delta",
+      "type": "architectural",
+      "stakes": "medium",
+      "costCapUsd": 5.0,
+      "maxRounds": 5
+    }
+  },
   "peers": [
     {
       "name": "alice",
