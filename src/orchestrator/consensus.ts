@@ -12,6 +12,7 @@
 import type { Logger } from '../utils/logger.js';
 import type { BotRegistry } from '../api/bot-registry.js';
 import type { CardState, CardStatus } from '../types.js';
+import { normalizeApiTaskResult } from '../utils/upstream-api-error.js';
 import {
   buildPhase1Prompt,
   buildPhase2Prompt,
@@ -205,7 +206,8 @@ export class ConsensusOrchestrator {
           'green',
         );
       } else if (state.ejected.find((e) => e.bot === bot)) {
-        this.postCard(`❌ ${bot} ejected (Phase 1)`, 'JSON validation failed after retries', 'red');
+        const ejected = state.ejected.find((e) => e.bot === bot)!;
+        this.postCard(`❌ ${bot} ejected (Phase 1)`, ejected.detail, 'red');
       } else {
         const reason = result.status === 'rejected' ? (result.reason?.message || 'unknown') : 'invalid_output';
         state.ejected.push({ bot, reason: 'json_malformed', detail: reason, phase: 1 });
@@ -238,7 +240,7 @@ export class ConsensusOrchestrator {
         ? prompt
         : `${prompt}\n\n## RETRY NOTICE\nPrevious response was not valid JSON. Respond with ONLY the JSON object, no surrounding text.`;
 
-      const replyText = await this.invokeBotRaw(state, bot, cappedPrompt);
+      const replyText = await this.invokeBotRaw(state, bot, cappedPrompt, onEvent);
       if (replyText === null) {
         // Bot execution failed entirely (e.g. ejected upstream, quota exhausted).
         return null;
@@ -341,7 +343,7 @@ export class ConsensusOrchestrator {
       const cappedPrompt = attempt === 0
         ? prompt
         : `${prompt}\n\n## RETRY NOTICE\nPrevious response was not valid JSON matching the schema. Respond with ONLY the JSON object.`;
-      const replyText = await this.invokeBotRaw(state, myBot, cappedPrompt);
+      const replyText = await this.invokeBotRaw(state, myBot, cappedPrompt, onEvent);
       if (replyText === null) return null;
 
       const parsed = extractJsonFromReply(replyText);
@@ -451,7 +453,7 @@ export class ConsensusOrchestrator {
       const cappedPrompt = attempt === 0
         ? prompt
         : `${prompt}\n\n## RETRY NOTICE\nPrevious response was not valid JSON matching the schema. Respond with ONLY the JSON object.`;
-      const replyText = await this.invokeBotRaw(state, bot, cappedPrompt);
+      const replyText = await this.invokeBotRaw(state, bot, cappedPrompt, onEvent);
       if (replyText === null) return null;
 
       const parsed = extractJsonFromReply(replyText);
@@ -654,7 +656,7 @@ export class ConsensusOrchestrator {
 
     for (let attempt = 0; attempt <= MAX_JSON_RETRIES; attempt++) {
       const cappedPrompt = attempt === 0 ? prompt : `${prompt}\n\n## RETRY: Respond with ONLY the JSON object.`;
-      const replyText = await this.invokeBotRaw(state, bot, cappedPrompt);
+      const replyText = await this.invokeBotRaw(state, bot, cappedPrompt, onEvent);
       if (replyText === null) return null;
 
       const parsed = extractJsonFromReply(replyText);
@@ -690,7 +692,7 @@ export class ConsensusOrchestrator {
 
     for (let attempt = 0; attempt <= MAX_JSON_RETRIES; attempt++) {
       const cappedPrompt = attempt === 0 ? prompt : `${prompt}\n\n## RETRY: Respond with ONLY the JSON object.`;
-      const replyText = await this.invokeBotRaw(state, critic, cappedPrompt);
+      const replyText = await this.invokeBotRaw(state, critic, cappedPrompt, onEvent);
       if (replyText === null) return null;
 
       const parsed = extractJsonFromReply(replyText);
@@ -750,7 +752,7 @@ export class ConsensusOrchestrator {
 
     for (let attempt = 0; attempt <= MAX_JSON_RETRIES; attempt++) {
       const cappedPrompt = attempt === 0 ? prompt : `${prompt}\n\n## RETRY: Respond with ONLY the JSON object.`;
-      const replyText = await this.invokeBotRaw(state, bot, cappedPrompt);
+      const replyText = await this.invokeBotRaw(state, bot, cappedPrompt, onEvent);
       if (replyText === null) return null;
 
       const parsed = extractJsonFromReply(replyText);
@@ -782,7 +784,12 @@ export class ConsensusOrchestrator {
    * Uses a virtual chatId scoped to (consensusTaskId, botName) so each bot
    * gets isolated session state.
    */
-  private async invokeBotRaw(state: ConsensusState, botName: string, prompt: string): Promise<string | null> {
+  private async invokeBotRaw(
+    state: ConsensusState,
+    botName: string,
+    prompt: string,
+    onEvent?: ConsensusEventListener,
+  ): Promise<string | null> {
     const bot = this.registry.get(botName);
     if (!bot) {
       this.logger.warn({ botName, taskId: state.taskId }, 'Bot not found in registry');
@@ -796,17 +803,43 @@ export class ConsensusOrchestrator {
     }
 
     const chatId = `consensus-${state.taskId}-${botName}`;
-    const result = await bot.bridge.executeApiTask({
-      prompt,
-      chatId,
-      userId: 'consensus-orchestrator',
-      sendCards: false,
-    });
+    const result = normalizeApiTaskResult(
+      await bot.bridge.executeApiTask({
+        prompt,
+        chatId,
+        userId: 'consensus-orchestrator',
+        sendCards: false,
+      }),
+    );
 
     if (result.costUsd) state.costUsd += result.costUsd;
 
     if (!result.success) {
       this.logger.warn({ botName, error: result.error, taskId: state.taskId }, 'Bot execution failed');
+      if (!state.ejected.some((entry) => entry.bot === botName)) {
+        const ejected = {
+          bot: botName,
+          reason: 'execution_error' as const,
+          detail: result.error || 'Bot execution failed without an error message',
+          phase: state.phase,
+        };
+        state.ejected.push(ejected);
+        this.emit(
+          state,
+          'bot_ejected',
+          {
+            bot: botName,
+            phase: state.phase,
+            reason: ejected.reason,
+            detail: ejected.detail,
+            errorCode: result.errorCode,
+            upstreamStatus: result.upstreamStatus,
+            upstreamRequestId: result.upstreamRequestId,
+            retryable: result.retryable,
+          },
+          onEvent,
+        );
+      }
       return null;
     }
 
@@ -938,7 +971,8 @@ export class ConsensusOrchestrator {
 
     if (type === 'bot_ejected' && bot) {
       this.setDashboardBotStatus(phase, bot, role, 'failed');
-      this.dashboardNote = `${bot} ejected in ${this.phaseLabel(phase)}`;
+      const detail = typeof payload.detail === 'string' ? `: ${payload.detail}` : '';
+      this.dashboardNote = `${bot} ejected in ${this.phaseLabel(phase)}${detail}`;
       this.queueDashboardUpdate(state);
       return;
     }

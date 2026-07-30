@@ -7,6 +7,7 @@ import type {
   ToolCall,
   PendingQuestion,
 } from '../../feishu/card-builder.js';
+import { detectUpstreamApiError } from '../../utils/upstream-api-error.js';
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.tiff']);
 
@@ -560,8 +561,7 @@ function truncate(text: string, max: number): string {
 
 /** Detect API error responses that the SDK wraps as successful results */
 function isApiErrorResult(text: string): boolean {
-  if (!text) return false;
-  return /^API Error:\s*\d{3}\s/i.test(text);
+  return detectUpstreamApiError(text) !== undefined;
 }
 
 function stripLeakedToolCalls(text: string): string {

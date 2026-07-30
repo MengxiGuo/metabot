@@ -441,6 +441,7 @@ mm folders                          # 文件夹树
 # Agent 总线
 mb bots                             # 列出所有 Bot
 mb talk <bot> <chatId> <prompt>     # 与 Bot 对话
+mb consensus get <taskId>           # 查询共识；终态失败时退出码非 0
 mb schedule list                    # 列出定时任务
 mb schedule cron <bot> <chatId> '<cron>' <prompt>  # 创建周期性任务
 mb stats                            # 费用和使用统计
@@ -461,6 +462,13 @@ mb voice "你好世界" --play
 ```
 
 CLI 支持连接远程 MetaBot/MetaMemory 服务器，在 `~/.metabot/.env` 配置 `METABOT_URL` 和 `META_MEMORY_URL` 即可。
+
+`mb talk` 会识别被 SDK 包装成普通文本的上游错误（例如 Kimi 在
+“本次无数据可记，跳过入库”之后返回的 `API Error: 400 context window
+exceeds limit`），输出结构化 `errorCode/upstreamRequestId/retryable` 并以
+非零退出码结束。`mb consensus get` 在终态失败时同样返回非零；若共识仍
+由剩余 quorum 完成，会在 stderr 明确提示被 eject Bot 的
+`execution_error`。
 
 </details>
 

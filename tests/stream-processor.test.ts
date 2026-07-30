@@ -100,6 +100,24 @@ describe('StreamProcessor', () => {
     expect(state.errorMessage).toBe('Something failed; Another error');
   });
 
+  it('detects a provider API error after the Kimi no-data persistence preamble', () => {
+    const p = new StreamProcessor('hi');
+    const wrappedError = [
+      '本次无数据可记，跳过入库。',
+      '',
+      'API Error: 400 context window exceeds limit Request id: req_prod_123',
+    ].join('\n');
+    const state = p.processMessage(msg({
+      type: 'result',
+      subtype: 'success',
+      result: wrappedError,
+    }));
+
+    expect(state.status).toBe('error');
+    expect(state.responseText).toBe('');
+    expect(state.errorMessage).toBe(wrappedError);
+  });
+
   it('detects AskUserQuestion and sets waiting_for_input', () => {
     const p = new StreamProcessor('hi');
     const state = p.processMessage(msg({

@@ -64,6 +64,10 @@ Web Browser → WebSocket (/ws) → ws-server.ts → MessageBridge.executeApiTas
 - **`src/feishu/message-sender.ts`** — Feishu API wrapper for sending/updating cards, uploading/downloading images, sending text.
 - **`src/bridge/rate-limiter.ts`** — Throttles card updates to avoid Feishu API rate limits (default 1.5s interval). Keeps only the latest pending update.
 - **`src/api/peer-manager.ts`** — Manages cross-instance bot discovery and task forwarding. Polls peer MetaBot instances every 30s, caches their bot lists, supports qualified name routing (`peerName/botName`). Anti-loop via `X-MetaBot-Origin` header.
+- **`src/utils/upstream-api-error.ts`** — Detects provider errors that SDKs
+  accidentally wrap as successful assistant text (including Kimi's optional
+  no-data persistence preamble), normalizes `/api/talk` results into structured
+  failures, and preserves upstream status/request IDs.
 - **`src/web/ws-server.ts`** — WebSocket server for the Web UI. Handles upgrade on `/ws`, token auth via `?token=`, heartbeat, and routes `chat`/`stop`/`answer` messages. Also serves static files from `dist/web/` for the SPA.
 
 ### Outputs Directory Pattern

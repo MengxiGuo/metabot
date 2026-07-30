@@ -57,6 +57,12 @@ mb metrics                                 # Prometheus metrics
 mb health                                  # Health check
 ```
 
+`mb talk` fails with a non-zero exit code when the target engine returns an
+HTTP/provider error, including errors that an SDK incorrectly wrapped as
+ordinary assistant text. The JSON response includes `errorCode`,
+`upstreamStatus`, `upstreamRequestId`, and `retryable` when available. Do not
+keep waiting after the command exits non-zero.
+
 ### Codex Official Goal Mode
 
 For a Codex bot configured with `codex.transport: "app-server"`, users can use `/goal` directly in chat. This is Codex's official app-server goal API (`thread/goal/*`), not a MetaBot-local TODO tracker.
@@ -148,6 +154,11 @@ mb consensus list
 The protocol runs 5 phases: Independent Take → Cross-Critique → Falsification → Synthesis + Adversarial Verifier → Final Dissent. Output is structured (`agreedPoints`, `standingDissents`, `riskTags`, `empiricalQuestions`, `pureDifferences`) — not a free-form essay.
 
 Start a consensus task only once and retain its taskId. Poll `mb consensus get <taskId>` every 60s; do not duplicate the task because an Ark phase is quiet. Do not promise a fixed 5-minute ETA when Ark GLM participates.
+
+`mb consensus get` exits non-zero when the consensus task reaches terminal
+`failed` status. If quorum still succeeds after one panelist fails, the command
+keeps exit 0 but prints the ejected bot's `execution_error` detail to stderr;
+the same detail remains in `ejectedBots` in the JSON audit trail.
 
 Use cases: architectural decisions where you and a peer disagree; high-stakes plans where you want a falsification stress-test before acting; situations where you want a clear list of preserved-vs-dropped points instead of "we agreed". Skip for trivial questions — 1-shot `mb talk` is faster.
 

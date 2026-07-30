@@ -17,6 +17,61 @@ METABOT_AUTH="Authorization: Bearer $_secret"
 
 _json() { python3 -m json.tool 2>/dev/null || cat; }
 
+# Pretty-print an API response and fail the shell command when the JSON reports
+# a terminal failure. A completed consensus may still contain ejected bots; in
+# that case print their execution errors to stderr while preserving exit 0 when
+# quorum reached consensus.
+_json_checked() {
+  python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    obj = json.loads(raw)
+except Exception:
+    sys.stdout.write(raw)
+    sys.exit(1)
+
+print(json.dumps(obj, ensure_ascii=False, indent=2))
+
+failed = obj.get("success") is False or obj.get("status") == "failed"
+result = obj.get("result")
+if isinstance(result, dict):
+    failed = failed or result.get("success") is False
+    inner = result.get("responseText")
+    if isinstance(inner, str):
+        try:
+            consensus = json.loads(inner)
+        except Exception:
+            consensus = None
+        if isinstance(consensus, dict):
+            for entry in consensus.get("ejectedBots", []):
+                if isinstance(entry, dict) and entry.get("reason") == "execution_error":
+                    bot = entry.get("bot", "unknown")
+                    detail = entry.get("detail", "upstream execution error")
+                    print(f"mb: consensus bot {bot} ejected: {detail}", file=sys.stderr)
+
+sys.exit(1 if failed else 0)
+'
+}
+
+_api_json() {
+  local tmp http_code curl_status=0 body_status=0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/mb-api.XXXXXX")"
+  http_code="$(curl -sS -o "$tmp" -w '%{http_code}' "$@")" || curl_status=$?
+  _json_checked < "$tmp" || body_status=$?
+  rm -f "$tmp"
+
+  if [[ $curl_status -ne 0 ]]; then
+    echo "mb: API transport failed (curl exit $curl_status)" >&2
+    return "$curl_status"
+  fi
+  if [[ "$http_code" =~ ^[0-9]{3}$ ]] && (( http_code >= 400 )); then
+    echo "mb: API request failed (HTTP $http_code)" >&2
+    return 1
+  fi
+  return "$body_status"
+}
+
 cmd="${1:-help}"
 shift 2>/dev/null || true
 
@@ -52,7 +107,7 @@ if sys.argv[4]:
     out['callerBot'] = sys.argv[4]
 print(json.dumps(out))
 " "$bot" "$chat" "$prompt" "$caller" | \
-    curl -s -X POST "$METABOT_URL/api/talk" \
+    _api_json -X POST "$METABOT_URL/api/talk" \
       -H "$METABOT_AUTH" -H "Content-Type: application/json" \
       -d @-
     ;;
@@ -176,9 +231,9 @@ if sys.argv[10]:
     out['maxRounds'] = int(sys.argv[10])
 print(json.dumps(out))
 " "$consensus_profile" "$bots" "$problem" "$type_" "$stakes" "$consensus_chat" "$consensus_caller" "$consensus_synth" "$cost_cap" "$max_rounds" | \
-        curl -s -X POST "$METABOT_URL/api/consensus" \
+        _api_json -X POST "$METABOT_URL/api/consensus" \
           -H "$METABOT_AUTH" -H "Content-Type: application/json" \
-          -d @- | _json
+          -d @-
         ;;
       profiles|profile|ls)
         curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/consensus/profiles" | _json
@@ -258,7 +313,7 @@ print(json.dumps(out))
           echo "Usage: mb consensus get <taskId>"
           exit 1
         fi
-        curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/consensus/$tid" | _json
+        _api_json -H "$METABOT_AUTH" "$METABOT_URL/api/consensus/$tid"
         ;;
       *)
         echo "Usage:"

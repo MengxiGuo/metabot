@@ -7,6 +7,7 @@
  */
 
 import * as crypto from 'node:crypto';
+import type { UpstreamApiErrorCode } from '../utils/upstream-api-error.js';
 
 export interface AsyncTask {
   id: string;
@@ -22,6 +23,10 @@ export interface AsyncTask {
     costUsd?: number;
     durationMs?: number;
     error?: string;
+    errorCode?: UpstreamApiErrorCode;
+    upstreamStatus?: number;
+    upstreamRequestId?: string;
+    retryable?: boolean;
   };
   callbackChatId?: string;
   callbackBotName?: string;
