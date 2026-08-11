@@ -1,4 +1,7 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { SessionManager } from '../src/engines/claude/session-manager.js';
 
 function createLogger() {
@@ -7,9 +10,17 @@ function createLogger() {
 
 describe('SessionManager', () => {
   let manager: SessionManager;
+  let sessionStoreDir: string;
+
+  beforeEach(() => {
+    sessionStoreDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-session-manager-'));
+    process.env.SESSION_STORE_DIR = sessionStoreDir;
+  });
 
   afterEach(() => {
     if (manager) manager.destroy();
+    delete process.env.SESSION_STORE_DIR;
+    fs.rmSync(sessionStoreDir, { recursive: true, force: true });
   });
 
   it('creates a new session with default working directory', () => {
@@ -48,5 +59,52 @@ describe('SessionManager', () => {
     manager.resetSession('chat1');
     const session = manager.getSession('chat1');
     expect(session.sessionId).toBeUndefined();
+  });
+
+  it('clears expired conversation state while retaining model override', () => {
+    manager = new SessionManager('/tmp/test-dir', createLogger());
+    manager.getSession('chat1');
+    manager.setSessionModel('chat1', 'gpt-5.6-sol');
+    manager.setSessionId('chat1', 'sess-abc');
+    manager.addUsage('chat1', 123, 0.45, 6789);
+
+    const session = manager.getSession('chat1');
+    session.lastUsed = Date.now() - 25 * 60 * 60 * 1000;
+    (manager as any).cleanupExpired();
+
+    const retained = manager.getSession('chat1');
+    expect(retained.model).toBe('gpt-5.6-sol');
+    expect(retained.sessionId).toBeUndefined();
+    expect(retained.cumulativeTokens).toBe(0);
+    expect(retained.cumulativeCostUsd).toBe(0);
+    expect(retained.cumulativeDurationMs).toBe(0);
+  });
+
+  it('loads expired persisted model override without stale sessionId', () => {
+    const persistPath = path.join(sessionStoreDir, 'sessions-default.json');
+    const lastUsed = Date.now() - 25 * 60 * 60 * 1000;
+    fs.writeFileSync(
+      persistPath,
+      JSON.stringify({
+        chat1: {
+          sessionId: 'sess-stale',
+          workingDirectory: '/tmp/test-dir',
+          lastUsed,
+          cumulativeTokens: 123,
+          cumulativeCostUsd: 0.45,
+          cumulativeDurationMs: 6789,
+          model: 'gpt-5.6-sol',
+        },
+      }),
+      'utf-8',
+    );
+
+    manager = new SessionManager('/tmp/test-dir', createLogger());
+    const session = manager.getSession('chat1');
+    expect(session.model).toBe('gpt-5.6-sol');
+    expect(session.sessionId).toBeUndefined();
+    expect(session.cumulativeTokens).toBe(0);
+    expect(session.cumulativeCostUsd).toBe(0);
+    expect(session.cumulativeDurationMs).toBe(0);
   });
 });

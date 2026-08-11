@@ -14,9 +14,9 @@ export interface UserSession {
   cumulativeCostUsd: number;
   /** Cumulative duration (ms) across all queries in this session */
   cumulativeDurationMs: number;
-  /** Per-session model override (e.g. "claude-opus-4-7"). Falls back to bot default when undefined. */
+  /** Durable per-chat model override (e.g. "claude-opus-4-7"). Falls back to bot default when undefined. */
   model?: string;
-  /** Per-session engine override ("claude" | "kimi"). Falls back to bot default when undefined. */
+  /** Durable per-chat engine override ("claude" | "kimi"). Falls back to bot default when undefined. */
   engine?: EngineName;
 }
 
@@ -45,8 +45,7 @@ export class SessionManager {
     botName: string = 'default',
   ) {
     // Persist sessions to a file under the project data dir
-    const dataDir = process.env.SESSION_STORE_DIR
-      || path.join(os.homedir(), '.metabot');
+    const dataDir = process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot');
     fs.mkdirSync(dataDir, { recursive: true });
     this.persistPath = path.join(dataDir, `sessions-${botName}.json`);
 
@@ -155,14 +154,38 @@ export class SessionManager {
     }
   }
 
+  private hasDurablePreferences(session: UserSession | PersistedSession): boolean {
+    return !!session.model || !!session.engine || session.workingDirectory !== this.defaultWorkingDirectory;
+  }
+
+  private clearConversationState(session: UserSession): boolean {
+    const changed =
+      !!session.sessionId ||
+      session.cumulativeTokens !== 0 ||
+      session.cumulativeCostUsd !== 0 ||
+      session.cumulativeDurationMs !== 0;
+    session.sessionId = undefined;
+    session.cumulativeTokens = 0;
+    session.cumulativeCostUsd = 0;
+    session.cumulativeDurationMs = 0;
+    return changed;
+  }
+
   private cleanupExpired(): void {
     const now = Date.now();
     let changed = false;
     for (const [chatId, session] of this.sessions) {
       if (now - session.lastUsed > SESSION_TTL_MS) {
-        this.sessions.delete(chatId);
-        this.logger.debug({ chatId }, 'Expired session cleaned up');
-        changed = true;
+        if (this.hasDurablePreferences(session)) {
+          if (this.clearConversationState(session)) {
+            this.logger.info({ chatId }, 'Expired session state cleared; durable preferences retained');
+            changed = true;
+          }
+        } else {
+          this.sessions.delete(chatId);
+          this.logger.debug({ chatId }, 'Expired session cleaned up');
+          changed = true;
+        }
       }
     }
     if (changed) {
@@ -174,8 +197,8 @@ export class SessionManager {
     try {
       const data: Record<string, PersistedSession> = {};
       for (const [chatId, session] of this.sessions) {
-        // Persist sessions that have a sessionId, model, or engine override
-        if (session.sessionId || session.model || session.engine) {
+        // Persist sessions that have conversation state or durable preferences.
+        if (session.sessionId || this.hasDurablePreferences(session)) {
           data[chatId] = {
             sessionId: session.sessionId || '',
             workingDirectory: session.workingDirectory,
@@ -201,23 +224,25 @@ export class SessionManager {
       const data: Record<string, PersistedSession> = JSON.parse(raw);
       const now = Date.now();
       let loaded = 0;
+      let retainedExpiredPreferences = 0;
       for (const [chatId, persisted] of Object.entries(data)) {
-        // Skip expired sessions
-        if (now - persisted.lastUsed > SESSION_TTL_MS) continue;
+        const expired = now - persisted.lastUsed > SESSION_TTL_MS;
+        if (expired && !this.hasDurablePreferences(persisted)) continue;
         this.sessions.set(chatId, {
-          sessionId: persisted.sessionId || undefined,
+          sessionId: expired ? undefined : persisted.sessionId || undefined,
           workingDirectory: persisted.workingDirectory,
           lastUsed: persisted.lastUsed,
-          cumulativeTokens: persisted.cumulativeTokens ?? 0,
-          cumulativeCostUsd: persisted.cumulativeCostUsd ?? 0,
-          cumulativeDurationMs: persisted.cumulativeDurationMs ?? 0,
+          cumulativeTokens: expired ? 0 : (persisted.cumulativeTokens ?? 0),
+          cumulativeCostUsd: expired ? 0 : (persisted.cumulativeCostUsd ?? 0),
+          cumulativeDurationMs: expired ? 0 : (persisted.cumulativeDurationMs ?? 0),
           model: persisted.model,
           engine: persisted.engine,
         });
         loaded++;
+        if (expired) retainedExpiredPreferences++;
       }
       if (loaded > 0) {
-        this.logger.info({ loaded, path: this.persistPath }, 'Restored sessions from disk');
+        this.logger.info({ loaded, retainedExpiredPreferences, path: this.persistPath }, 'Restored sessions from disk');
       }
     } catch (err) {
       this.logger.warn({ err }, 'Failed to load sessions from disk, starting fresh');
