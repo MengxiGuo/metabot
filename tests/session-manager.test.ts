@@ -69,7 +69,7 @@ describe('SessionManager', () => {
     manager.addUsage('chat1', 123, 0.45, 6789);
 
     const session = manager.getSession('chat1');
-    session.lastUsed = Date.now() - 25 * 60 * 60 * 1000;
+    session.lastUsed = Date.now() - 6 * 24 * 60 * 60 * 1000;
     (manager as any).cleanupExpired();
 
     const retained = manager.getSession('chat1');
@@ -82,7 +82,7 @@ describe('SessionManager', () => {
 
   it('loads expired persisted model override without stale sessionId', () => {
     const persistPath = path.join(sessionStoreDir, 'sessions-default.json');
-    const lastUsed = Date.now() - 25 * 60 * 60 * 1000;
+    const lastUsed = Date.now() - 6 * 24 * 60 * 60 * 1000;
     fs.writeFileSync(
       persistPath,
       JSON.stringify({

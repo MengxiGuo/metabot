@@ -31,7 +31,7 @@ interface PersistedSession {
   engine?: EngineName;
 }
 
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const SESSION_TTL_MS = 5 * 24 * 60 * 60 * 1000; // 5 days
 const MAX_SESSIONS = 10_000;
 
 export class SessionManager {
