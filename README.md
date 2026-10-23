@@ -8,7 +8,7 @@
 
 ### 在飞书 / Telegram / 微信上用手机控制 Claude Code、Kimi Code、Codex CLI 或 Gemini CLI
 
-*写代码 · 管 Agent · 自动化一切*
+_写代码 · 管 Agent · 自动化一切_
 
 <p>
   <a href="https://github.com/xvirobotics/metabot/actions"><img src="https://img.shields.io/github/actions/workflow/status/xvirobotics/metabot/ci.yml?branch=main&style=for-the-badge&label=CI&logo=github" alt="CI"></a>
@@ -56,23 +56,24 @@ curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh
 MetaBot 不是只绑定一家 — 四大顶级 AI 编码 Agent 都内置原生支持，**你的订阅直接用**。
 （注：Gemini CLI 引擎是本 fork 新增，上游 xvirobotics/metabot 暂未包含。详见 [FORK.md](FORK.md)。）
 
-| | **Claude Code**（Anthropic） | **Kimi Code**（Moonshot） | **Codex CLI**（OpenAI） | **Gemini CLI**（Google） |
-|---|---|---|---|---|
-| **订阅直连** | ✅ `claude login` OAuth | ✅ `kimi login` | ✅ `codex login`，走 ChatGPT 订阅 | ✅ `gemini` 交互式 OAuth，走 Google AI Pro 订阅 |
-| **API Key 兜底** | ✅ `ANTHROPIC_API_KEY` / 第三方 Anthropic 兼容端 | ✅ Moonshot API Key | ✅ `OPENAI_API_KEY` / Codex profile | 暂仅订阅，未启用 API Key 路径 |
-| **上下文窗口** | 200k（Opus/Sonnet 可选 1M） | 256k（kimi-for-coding） | 400k（gpt-5.x-codex） | 1M（gemini-3.x） |
-| **工具能力** | Read/Write/Edit/Bash/Glob/Grep/WebSearch/MCP | 同上（Kimi CLI 原生 + `.claude/skills/` 自动发现） | Codex CLI 原生 sandbox + shell 工具链 | gemini-cli 原生工具链（含 `--approval-mode yolo`） |
-| **自主运行模式** | `bypassPermissions` | `yoloMode`（等价） | `--dangerously-bypass-approvals-and-sandbox` | `--approval-mode yolo` |
-| **子 Agent** | `.claude/agents/*.md` 自动加载 | 仅内置 `default` / `okabe` | 暂不支持子 Agent | 暂不支持子 Agent |
-| **工作区说明** | `CLAUDE.md` | `AGENTS.md`（安装器自动建软链） | `AGENTS.md`（Codex 官方约定） | `GEMINI.md`（gemini-cli 约定） |
-| **额度自动 fallback** | 单池 | 单池 | 单池 | ✅ Pro→Flash 自动降级（3.1-pro-preview 撞墙转 3-flash-preview） |
-| **卡片 footer 显示** | `$cost` | `$cost` | `$cost` | ✅ `quota: X% used (还有 Yh reset)` — 走 Code Assist API |
+|                       | **Claude Code**（Anthropic）                     | **Kimi Code**（Moonshot）                          | **Codex CLI**（OpenAI）                      | **Gemini CLI**（Google）                                        |
+| --------------------- | ------------------------------------------------ | -------------------------------------------------- | -------------------------------------------- | --------------------------------------------------------------- |
+| **订阅直连**          | ✅ `claude login` OAuth                          | ✅ `kimi login`                                    | ✅ `codex login`，走 ChatGPT 订阅            | ✅ `gemini` 交互式 OAuth，走 Google AI Pro 订阅                 |
+| **API Key 兜底**      | ✅ `ANTHROPIC_API_KEY` / 第三方 Anthropic 兼容端 | ✅ Moonshot API Key                                | ✅ `OPENAI_API_KEY` / Codex profile          | 暂仅订阅，未启用 API Key 路径                                   |
+| **上下文窗口**        | 200k（Opus/Sonnet 可选 1M）                      | 256k（kimi-for-coding）                            | 400k（gpt-5.x-codex）                        | 1M（gemini-3.x）                                                |
+| **工具能力**          | Read/Write/Edit/Bash/Glob/Grep/WebSearch/MCP     | 同上（Kimi CLI 原生 + `.claude/skills/` 自动发现） | Codex CLI 原生 sandbox + shell 工具链        | gemini-cli 原生工具链（含 `--approval-mode yolo`）              |
+| **自主运行模式**      | `bypassPermissions`                              | `yoloMode`（等价）                                 | `--dangerously-bypass-approvals-and-sandbox` | `--approval-mode yolo`                                          |
+| **子 Agent**          | `.claude/agents/*.md` 自动加载                   | 仅内置 `default` / `okabe`                         | 暂不支持子 Agent                             | 暂不支持子 Agent                                                |
+| **工作区说明**        | `CLAUDE.md`                                      | `AGENTS.md`（安装器自动建软链）                    | `AGENTS.md`（Codex 官方约定）                | `GEMINI.md`（gemini-cli 约定）                                  |
+| **额度自动 fallback** | 单池                                             | 单池                                               | 单池                                         | ✅ Pro→Flash 自动降级（3.1-pro-preview 撞墙转 3-flash-preview） |
+| **卡片 footer 显示**  | `$cost`                                          | `$cost`                                            | `$cost`                                      | ✅ `quota: X% used (还有 Yh reset)` — 走 Code Assist API        |
 
 **配置只需一行** — 每个 Bot 独立选引擎：
+
 ```json
 { "name": "bulma",  "engine": "kimi",   "kimi": { "thinking": true } }
 { "name": "goku",   "engine": "claude" }
-{ "name": "vegeta", "engine": "codex",  "codex": { "model": "gpt-5.4-codex" } }
+{ "name": "vegeta", "engine": "codex",  "codex": { "model": "gpt-6-astra", "reasoningEffortByModel": { "gpt-6-astra": "xhigh" } } }
 { "name": "piccolo","engine": "gemini", "gemini": { "model": "gemini-3.1-pro-preview", "approvalMode": "yolo" } }
 ```
 
@@ -95,17 +96,17 @@ Gemini 引擎使用 `gemini` CLI（`npm i -g @google/gemini-cli` 后执行 `gemi
 
 ## 为什么选 MetaBot
 
-| | MetaBot | 直接用 Claude / Kimi / Codex CLI | Dify / Coze |
-|---|---|---|---|
-| **手机控制** | 飞书/TG/微信随时随地 | 只能在终端 | 有，但不能跑代码 |
-| **引擎选择** | Claude ✕ Kimi ✕ Codex 三引擎 | 各自单一 | 无，只能调 API |
-| **订阅直连** | 三家原生订阅都直接用 | 一次只能登一个 | 不支持订阅 |
-| **代码能力** | 完整 Agent SDK（Read/Write/Edit/Bash/MCP） | 完整 | 无 |
-| **多 Agent** | Agent 总线 + 任务委派 + 运行时创建 | 单会话 | 有，但封闭生态 |
-| **共享记忆** | MetaMemory 全文搜索 + 自动同步飞书知识库 | 无 | 无 |
-| **定时任务** | Cron 调度，跨重启持久化 | 无 | 有 |
-| **自主运行** | bypassPermissions / yoloMode，全自动 | 需要人工确认 | 受限于 workflow |
-| **开源** | MIT，完全可控 | CLI 开源 | 闭源 SaaS |
+|              | MetaBot                                    | 直接用 Claude / Kimi / Codex CLI | Dify / Coze      |
+| ------------ | ------------------------------------------ | -------------------------------- | ---------------- |
+| **手机控制** | 飞书/TG/微信随时随地                       | 只能在终端                       | 有，但不能跑代码 |
+| **引擎选择** | Claude ✕ Kimi ✕ Codex 三引擎               | 各自单一                         | 无，只能调 API   |
+| **订阅直连** | 三家原生订阅都直接用                       | 一次只能登一个                   | 不支持订阅       |
+| **代码能力** | 完整 Agent SDK（Read/Write/Edit/Bash/MCP） | 完整                             | 无               |
+| **多 Agent** | Agent 总线 + 任务委派 + 运行时创建         | 单会话                           | 有，但封闭生态   |
+| **共享记忆** | MetaMemory 全文搜索 + 自动同步飞书知识库   | 无                               | 无               |
+| **定时任务** | Cron 调度，跨重启持久化                    | 无                               | 有               |
+| **自主运行** | bypassPermissions / yoloMode，全自动       | 需要人工确认                     | 受限于 workflow  |
+| **开源**     | MIT，完全可控                              | CLI 开源                         | 闭源 SaaS        |
 
 ## 工作原理
 
@@ -128,16 +129,16 @@ Gemini 引擎使用 `gemini` CLI（`npm i -g @google/gemini-cli` 后执行 `gemi
 
 MetaBot 支持 4 种方式与你的 Agent 团队交互：
 
-| 客户端 | 场景 | 特色功能 |
-|--------|------|---------|
-| **飞书/Lark** | 工作场景，团队协作 | 流式交互卡片、@mention 路由、知识库自动同步 |
-| **Telegram** | 个人/国际用户 | 30 秒配置、长轮询无需公网 IP、群聊 + 私聊 |
-| **Web UI** | 浏览器端，语音对话 | 电话语音模式（VAD）、RTC 实时通话、MetaMemory 浏览器、团队看板 |
+| 客户端        | 场景               | 特色功能                                                       |
+| ------------- | ------------------ | -------------------------------------------------------------- |
+| **飞书/Lark** | 工作场景，团队协作 | 流式交互卡片、@mention 路由、知识库自动同步                    |
+| **Telegram**  | 个人/国际用户      | 30 秒配置、长轮询无需公网 IP、群聊 + 私聊                      |
+| **Web UI**    | 浏览器端，语音对话 | 电话语音模式（VAD）、RTC 实时通话、MetaMemory 浏览器、团队看板 |
 
-| 支柱 | 组件 | 作用 |
-|------|------|------|
-| **受监督** | IM Bridge | 实时流式卡片展示每一步工具调用。人类看到 Agent 做的一切 |
-| **自我进化** | MetaMemory | 共享知识库。Agent 写入学到的东西，其他 Agent 检索引用 |
+| 支柱           | 组件                            | 作用                                                          |
+| -------------- | ------------------------------- | ------------------------------------------------------------- |
+| **受监督**     | IM Bridge                       | 实时流式卡片展示每一步工具调用。人类看到 Agent 做的一切       |
+| **自我进化**   | MetaMemory                      | 共享知识库。Agent 写入学到的东西，其他 Agent 检索引用         |
 | **Agent 组织** | MetaSkill + 调度器 + Agent 总线 | 一个命令生成完整 Agent 团队。Agent 互相委派任务、创建新 Agent |
 
 ## Web UI
@@ -161,18 +162,18 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 
 ## 核心能力
 
-| 组件 | 一句话说明 |
-|------|-----------|
-| **三引擎内核** | 每个 Bot 独立选 Claude Code / Kimi Code / Codex CLI — 完整工具链（Read/Write/Edit/Bash/Glob/Grep/WebSearch/MCP），自主模式运行 |
-| **MetaSkill** | Agent 工厂。`/metaskill` 一键生成 `.claude/` Agent 团队（orchestrator + 专家 + reviewer） |
-| **MetaMemory** | 内嵌 SQLite 知识库，全文搜索，Web UI，变更自动同步到飞书知识库 |
-| **IM Bridge** | 飞书、Telegram、微信（含手机端）对话任意 Agent，流式卡片 + 工具调用追踪 |
-| **Agent 总线** | Agent 通过 `mb talk` 互相对话，运行时创建/删除 Bot |
-| **定时调度器** | Cron 周期任务 + 一次性延迟任务，跨重启持久化，忙时自动重试 |
-| **飞书 Lark CLI** | 200+ 命令覆盖文档、消息、日历、任务等 11 大业务域，19 个 AI Agent Skills |
-| **Skill Hub** | 跨实例技能共享注册中心。`mb skills` 发布、发现、安装技能，FTS5 全文搜索 |
-| **Peers 联邦** | 跨实例 Bot 发现和任务路由，`mb talk alice/backend-bot` 自动路由 |
-| **语音助手** | Jarvis 模式 — AirPods 说 "Hey Siri, Jarvis" 语音控制 Agent |
+| 组件              | 一句话说明                                                                                                                     |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **三引擎内核**    | 每个 Bot 独立选 Claude Code / Kimi Code / Codex CLI — 完整工具链（Read/Write/Edit/Bash/Glob/Grep/WebSearch/MCP），自主模式运行 |
+| **MetaSkill**     | Agent 工厂。`/metaskill` 一键生成 `.claude/` Agent 团队（orchestrator + 专家 + reviewer）                                      |
+| **MetaMemory**    | 内嵌 SQLite 知识库，全文搜索，Web UI，变更自动同步到飞书知识库                                                                 |
+| **IM Bridge**     | 飞书、Telegram、微信（含手机端）对话任意 Agent，流式卡片 + 工具调用追踪                                                        |
+| **Agent 总线**    | Agent 通过 `mb talk` 互相对话，运行时创建/删除 Bot                                                                             |
+| **定时调度器**    | Cron 周期任务 + 一次性延迟任务，跨重启持久化，忙时自动重试                                                                     |
+| **飞书 Lark CLI** | 200+ 命令覆盖文档、消息、日历、任务等 11 大业务域，19 个 AI Agent Skills                                                       |
+| **Skill Hub**     | 跨实例技能共享注册中心。`mb skills` 发布、发现、安装技能，FTS5 全文搜索                                                        |
+| **Peers 联邦**    | 跨实例 Bot 发现和任务路由，`mb talk alice/backend-bot` 自动路由                                                                |
+| **语音助手**      | Jarvis 模式 — AirPods 说 "Hey Siri, Jarvis" 语音控制 Agent                                                                     |
 
 ## 快速开始
 
@@ -258,11 +259,11 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 <details>
 <summary><strong>私聊 vs 群聊</strong></summary>
 
-| 场景 | @提及 | 说明 |
-|------|-------|------|
-| **私聊** | 不需要 | 所有消息直接发送给 Bot |
-| **1对1 群聊**（你 + Bot 两人群） | 不需要 | 自动识别为类私聊 |
-| **多人群聊** | 需要 @Bot | 只有 @Bot 的消息才会触发回复 |
+| 场景                             | @提及     | 说明                         |
+| -------------------------------- | --------- | ---------------------------- |
+| **私聊**                         | 不需要    | 所有消息直接发送给 Bot       |
+| **1对1 群聊**（你 + Bot 两人群） | 不需要    | 自动识别为类私聊             |
+| **多人群聊**                     | 需要 @Bot | 只有 @Bot 的消息才会触发回复 |
 
 > **推荐**：建一个只有你和 Bot 的两人群聊。不需要每次 @Bot，又能保留群聊的好处（置顶、分类管理）。
 
@@ -289,56 +290,60 @@ MetaBot 支持 4 种方式与你的 Agent 团队交互：
 
 ```json
 {
-  "feishuBots": [{
-    "name": "metabot",
-    "feishuAppId": "cli_xxx",
-    "feishuAppSecret": "...",
-    "defaultWorkingDirectory": "/home/user/project"
-  }],
-  "telegramBots": [{
-    "name": "tg-bot",
-    "telegramBotToken": "123456:ABC...",
-    "defaultWorkingDirectory": "/home/user/project"
-  }]
+  "feishuBots": [
+    {
+      "name": "metabot",
+      "feishuAppId": "cli_xxx",
+      "feishuAppSecret": "...",
+      "defaultWorkingDirectory": "/home/user/project"
+    }
+  ],
+  "telegramBots": [
+    {
+      "name": "tg-bot",
+      "telegramBotToken": "123456:ABC...",
+      "defaultWorkingDirectory": "/home/user/project"
+    }
+  ]
 }
 ```
 
 <details>
 <summary><strong>所有 Bot 配置字段</strong></summary>
 
-| 字段 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `name` | 是 | — | Bot 标识名 |
-| `defaultWorkingDirectory` | 是 | — | Claude 的工作目录 |
-| `feishuAppId` / `feishuAppSecret` | 飞书 | — | 飞书应用凭证 |
-| `telegramBotToken` | Telegram | — | Telegram Bot Token |
-| `wechatBotToken` | 微信(可选) | — | 预认证 iLink token（不填则 QR 登录） |
-| `maxTurns` / `maxBudgetUsd` | 否 | 不限 | 执行限制 |
-| `model` | 否 | SDK 默认 | Claude 模型 |
-| `apiKey` | 否 | — | Anthropic API Key（不设则从 `~/.claude/.credentials.json` 动态读取，兼容 cc-switch） |
+| 字段                              | 必填       | 默认值   | 说明                                                                                 |
+| --------------------------------- | ---------- | -------- | ------------------------------------------------------------------------------------ |
+| `name`                            | 是         | —        | Bot 标识名                                                                           |
+| `defaultWorkingDirectory`         | 是         | —        | Claude 的工作目录                                                                    |
+| `feishuAppId` / `feishuAppSecret` | 飞书       | —        | 飞书应用凭证                                                                         |
+| `telegramBotToken`                | Telegram   | —        | Telegram Bot Token                                                                   |
+| `wechatBotToken`                  | 微信(可选) | —        | 预认证 iLink token（不填则 QR 登录）                                                 |
+| `maxTurns` / `maxBudgetUsd`       | 否         | 不限     | 执行限制                                                                             |
+| `model`                           | 否         | SDK 默认 | Claude 模型                                                                          |
+| `apiKey`                          | 否         | —        | Anthropic API Key（不设则从 `~/.claude/.credentials.json` 动态读取，兼容 cc-switch） |
 
 </details>
 
 <details>
 <summary><strong>环境变量 (.env)</strong></summary>
 
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `API_PORT` | 9100 | HTTP API 端口 |
-| `API_SECRET` | — | Bearer 认证（同时保护 API 和 Web UI） |
-| `MEMORY_ENABLED` | true | 启用 MetaMemory |
-| `MEMORY_PORT` | 8100 | MetaMemory 端口 |
-| `MEMORY_ADMIN_TOKEN` | — | 管理员 Token（完整访问） |
-| `MEMORY_TOKEN` | — | 读者 Token（仅共享文件夹） |
-| `WIKI_SYNC_ENABLED` | true | 启用 MetaMemory→飞书知识库同步 |
-| `WIKI_SPACE_NAME` | MetaMemory | 飞书知识库空间名称 |
-| `WIKI_AUTO_SYNC` | true | MetaMemory 变更时自动同步 |
-| `VOLCENGINE_TTS_APPID` | — | 豆包语音（TTS + STT） |
-| `VOLCENGINE_TTS_ACCESS_KEY` | — | 豆包语音密钥 |
-| `METABOT_URL` | `http://localhost:9100` | MetaBot API 地址 |
-| `META_MEMORY_URL` | `http://localhost:8100` | MetaMemory 服务地址 |
-| `METABOT_PEERS` | — | Peer MetaBot 地址（逗号分隔） |
-| `LOG_LEVEL` | info | 日志级别 |
+| 变量                        | 默认                    | 说明                                  |
+| --------------------------- | ----------------------- | ------------------------------------- |
+| `API_PORT`                  | 9100                    | HTTP API 端口                         |
+| `API_SECRET`                | —                       | Bearer 认证（同时保护 API 和 Web UI） |
+| `MEMORY_ENABLED`            | true                    | 启用 MetaMemory                       |
+| `MEMORY_PORT`               | 8100                    | MetaMemory 端口                       |
+| `MEMORY_ADMIN_TOKEN`        | —                       | 管理员 Token（完整访问）              |
+| `MEMORY_TOKEN`              | —                       | 读者 Token（仅共享文件夹）            |
+| `WIKI_SYNC_ENABLED`         | true                    | 启用 MetaMemory→飞书知识库同步        |
+| `WIKI_SPACE_NAME`           | MetaMemory              | 飞书知识库空间名称                    |
+| `WIKI_AUTO_SYNC`            | true                    | MetaMemory 变更时自动同步             |
+| `VOLCENGINE_TTS_APPID`      | —                       | 豆包语音（TTS + STT）                 |
+| `VOLCENGINE_TTS_ACCESS_KEY` | —                       | 豆包语音密钥                          |
+| `METABOT_URL`               | `http://localhost:9100` | MetaBot API 地址                      |
+| `META_MEMORY_URL`           | `http://localhost:8100` | MetaMemory 服务地址                   |
+| `METABOT_PEERS`             | —                       | Peer MetaBot 地址（逗号分隔）         |
+| `LOG_LEVEL`                 | info                    | 日志级别                              |
 
 </details>
 
@@ -380,45 +385,51 @@ MetaBot 以 `bypassPermissions` 模式运行 Claude Code — 无交互式确认�
 
 ## 聊天命令
 
-| 命令 | 说明 |
-|------|------|
-| `/reset` | 清除会话 |
-| `/stop` | 中止当前任务 |
-| `/status` | 查看会话状态（含当前模型） |
-| `/model` | 查看当前模型；`/model list` 查看可用模型；`/model <name>` 切换；`/model reset` 恢复默认 |
-| `/memory list` | 浏览知识库目录 |
-| `/memory search 关键词` | 搜索知识库 |
-| `/sync` | 同步 MetaMemory 到飞书知识库 |
-| `/metaskill ...` | 生成 Agent 团队、Agent 或 Skill |
-| `/help` | 帮助 |
+| 命令                    | 说明                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------ |
+| `/reset`                | 清除会话                                                                                               |
+| `/stop`                 | 中止当前任务                                                                                           |
+| `/status`               | 查看会话状态（含当前模型）                                                                             |
+| `/model`                | 查看当前模型；`/model list` 查看可用模型；`/model <name>` 切换；`/model reset` 恢复默认                |
+| `/effort`               | 查看 Codex/Antigravity reasoning effort；`/effort <level>` 为当前会话临时覆盖；`/effort reset` 恢复模型/Bot 默认值 |
+| `/context`              | 查看当前 Codex 上下文模式；`/context long` 仅为当前 bot + chat 开长上下文；`/context normal` 恢复默认  |
+| `/memory list`          | 浏览知识库目录                                                                                         |
+| `/memory search 关键词` | 搜索知识库                                                                                             |
+| `/sync`                 | 同步 MetaMemory 到飞书知识库                                                                           |
+| `/metaskill ...`        | 生成 Agent 团队、Agent 或 Skill                                                                        |
+| `/help`                 | 帮助                                                                                                   |
 
 > **模型切换**：每个会话可独立设置模型。在模型名后加 `[1m]` 可启用 1M 上下文窗口（仅 Opus 4.7/4.6、Sonnet 4.6 支持），例如 `/model claude-opus-4-7[1m]`。OAuth/Pro-Max 登录用户 SDK 会丢弃 beta flag，`[1m]` 后缀是唯一可靠的 1M 开启方式。
+
+> **Codex 长上下文**：`/context long` 通过当前 chat 的 Codex 子进程参数请求 `model_context_window=1000000` 和 `model_auto_compact_token_limit=900000`，不会修改全局 `~/.codex/config.toml`，也不会影响其他 bot/chat。切换模式会脱离旧线程，下一条消息开启新会话；旧 rollout 文件不会删除。实际窗口仍受模型目录上限约束，以结果卡 footer 为准。
+
+> **Codex reasoning effort**：Bot 配置可用 `codex.reasoningEffort` 设置统一默认值，并用 `codex.reasoningEffortByModel` 为精确模型名覆盖。群聊里的 `/effort <level>` 优先级最高，只影响当前 bot + chat；切换 effort 会脱离旧 Codex 线程，确保下一条消息使用新配置。Codex 结果卡 footer 会显示 rollout 实际记录的 `effort`。
 
 <details>
 <summary><strong>API 参考</strong></summary>
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/api/health` | 健康检查 |
-| `GET` | `/api/bots` | 列出 Bot（本地 + Peer） |
-| `POST` | `/api/bots` | 运行时创建 Bot |
-| `DELETE` | `/api/bots/:name` | 删除 Bot |
-| `POST` | `/api/talk` | 与 Bot 对话（自动路由到 peer） |
-| `GET` | `/api/peers` | 列出 Peer 及状态 |
-| `POST` | `/api/schedule` | 创建定时任务 |
-| `GET` | `/api/schedule` | 列出定时任务 |
-| `PATCH` | `/api/schedule/:id` | 更新定时任务 |
-| `DELETE` | `/api/schedule/:id` | 取消定时任务 |
-| `POST` | `/api/sync` | 触发 Wiki 同步 |
-| `GET` | `/api/stats` | 费用与使用统计 |
-| `GET` | `/api/metrics` | Prometheus 监控指标 |
-| `POST` | `/api/tts` | 文字转语音 |
-| `GET` | `/api/skills` | 列出技能（本地 + Peer） |
-| `GET` | `/api/skills/search?q=` | 全文搜索技能 |
-| `GET` | `/api/skills/:name` | 获取技能详情 |
-| `POST` | `/api/skills` | 发布技能 |
-| `POST` | `/api/skills/:name/install` | 安装技能到 Bot |
-| `DELETE` | `/api/skills/:name` | 删除技能 |
+| 方法     | 路径                        | 说明                           |
+| -------- | --------------------------- | ------------------------------ |
+| `GET`    | `/api/health`               | 健康检查                       |
+| `GET`    | `/api/bots`                 | 列出 Bot（本地 + Peer）        |
+| `POST`   | `/api/bots`                 | 运行时创建 Bot                 |
+| `DELETE` | `/api/bots/:name`           | 删除 Bot                       |
+| `POST`   | `/api/talk`                 | 与 Bot 对话（自动路由到 peer） |
+| `GET`    | `/api/peers`                | 列出 Peer 及状态               |
+| `POST`   | `/api/schedule`             | 创建定时任务                   |
+| `GET`    | `/api/schedule`             | 列出定时任务                   |
+| `PATCH`  | `/api/schedule/:id`         | 更新定时任务                   |
+| `DELETE` | `/api/schedule/:id`         | 取消定时任务                   |
+| `POST`   | `/api/sync`                 | 触发 Wiki 同步                 |
+| `GET`    | `/api/stats`                | 费用与使用统计                 |
+| `GET`    | `/api/metrics`              | Prometheus 监控指标            |
+| `POST`   | `/api/tts`                  | 文字转语音                     |
+| `GET`    | `/api/skills`               | 列出技能（本地 + Peer）        |
+| `GET`    | `/api/skills/search?q=`     | 全文搜索技能                   |
+| `GET`    | `/api/skills/:name`         | 获取技能详情                   |
+| `POST`   | `/api/skills`               | 发布技能                       |
+| `POST`   | `/api/skills/:name/install` | 安装技能到 Bot                 |
+| `DELETE` | `/api/skills/:name`         | 删除技能                       |
 
 </details>
 
@@ -516,3 +527,22 @@ MetaBot 由 [XVI Robotics](https://xvirobotics.com) 打造（人形机器人大�
 ## License
 
 [MIT](LICENSE)
+
+### 反重力 Gemini / Claude 思考强度
+
+飞书当前引擎为 `antigravity` 时：`/effort` 查看请求强度和来源，`/effort list` 查询当前账号与模型实际可选档位，`/effort high` 设置，`/effort reset` 恢复机器人/模型默认。CLI 支持的候选值为 low、medium、high、xhigh、max；设置前按实际模型目录验证，不支持的档位不会保存。
+
+设置按 bot + chat 持久保存，优先于 `antigravity.effort`，不影响其他群聊或 Codex。改变设置会脱离旧对话，下一条消息开启新会话；旧记录保留但上下文不自动继承。重复设置同一档不重置会话；任务运行中拒绝切换。`/reset` 保留档位，`/model reset` 清除档位。查询目录失败时不更改设置。`/status` 和 `/model` 也显示请求强度。
+
+界面展示的是向 CLI 请求的设置，不代表测量了模型内部推理量；实际模型由 CLI 解析并在返回事件中确认。旧 `gemini` 引擎不使用此功能。
+
+
+### Consensus 停止与执行设置
+
+在发起群里向发起 bot 或参与 bot 发送 `/stop` 或单独的 `stop`（多人群仍遵守原有 @ 提及要求），会取消本群关联的所有活动 consensus，并停止当前普通任务。命中 consensus 时不会顺带暂停日常调度。其他群的讨论不受影响。
+
+按任务停止：`mb consensus stop <taskId>`；查看状态：`mb consensus get <taskId>`。API 是 `POST /api/consensus/:taskId/stop`。取消先返回 `stopping`，待参与者执行收尾后为 `cancelled`，结果内状态为 `aborted`，不是成功完成。重复停止不会重跑任务；已有工具副作用不会被撤销，已发出的结果和原生会话记录保留。服务重启前创建的旧任务无法补挂新取消控制器。
+
+独立讨论会话首次执行继承来源群同一 bot 的账号、模型、引擎、思考档位与工作目录，不继承原生会话 ID 或历史。继承只发生一次，后续阶段不覆盖讨论中自动换号的结果。
+
+反重力额度耗尽：明确的 `Resets in ...` 按实际剩余时长加 60 秒余量避让，按 runner 与额度组共享，并在服务重启后恢复；未知恢复时间仍冷却 5 分钟。不会因取消而换号重跑，也不会放宽已有的执行进展保护。

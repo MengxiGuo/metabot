@@ -89,6 +89,7 @@ export interface ConsensusEvent {
     | 'fork_triggered'
     | 'consensus_reached'
     | 'consensus_failed'
+    | 'consensus_aborted'
     | 'user_escalated';
   payload: Record<string, unknown>;
 }

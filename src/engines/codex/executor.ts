@@ -1,27 +1,26 @@
 import { execSync, spawn, type ChildProcess } from 'node:child_process';
-import type { BotConfigBase, CodexBotConfig } from '../../config.js';
+import type { BotConfigBase, CodexBotConfig, CodexContextMode, CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
-import type {
-  ApiContext,
-  ExecutionHandle,
-  ExecutorOptions,
-  SDKMessage,
-} from '../claude/executor.js';
-import {
-  createCodexTranslatorState,
-  translateCodexJsonEvent,
-  type CodexJsonEvent,
-} from './jsonl-translator.js';
-import { readCodexSessionStatus } from './quota-reader.js';
+import type { ApiContext, ExecutionHandle, ExecutorOptions, SDKMessage } from '../claude/executor.js';
+import { createCodexTranslatorState, translateCodexJsonEvent, type CodexJsonEvent } from './jsonl-translator.js';
+import { readCodexSessionStatus, type CodexQuota } from './quota-reader.js';
 import { CodexAppServerClient, codexAppServerEnabled } from './app-server-client.js';
 import {
   buildCodexAppServerGoalProgressMessage,
+  applyCodexRateLimitsSnapshot,
   createCodexAppServerTranslatorState,
   enableCodexAppServerGoalOperation,
   translateCodexAppServerNotification,
 } from './app-server-translator.js';
 import type { CodexGoal } from './goal.js';
+import { buildCodexContextOverrideArgs } from './context-mode.js';
+import { codexReasoningEffortConfigArg, resolveCodexReasoningEffort } from './reasoning-effort.js';
+import {
+  codexDeveloperInstructionsOverride,
+  INDEPENDENT_JUDGMENT_POLICY,
+  INDEPENDENT_JUDGMENT_POLICY_VERSION,
+} from '../shared/independent-judgment.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -57,6 +56,8 @@ export function buildCodexArgs(
   prompt: string,
   sessionId: string | undefined,
   model: string | undefined,
+  contextMode?: CodexContextMode,
+  reasoningEffort?: CodexReasoningEffort,
 ): string[] {
   const args: string[] = [];
 
@@ -71,6 +72,11 @@ export function buildCodexArgs(
   if (model) args.push('-m', model);
   if (codexConfig.profile) args.push('-p', codexConfig.profile);
   for (const extraArg of codexConfig.extraArgs ?? []) args.push(extraArg);
+  args.push(...buildCodexContextOverrideArgs(contextMode));
+  if (reasoningEffort) args.push('-c', codexReasoningEffortConfigArg(reasoningEffort));
+  // Place the canonical policy after deployment-local extraArgs so it cannot
+  // be silently replaced by a conflicting developer_instructions override.
+  args.push('-c', codexDeveloperInstructionsOverride());
 
   args.push('exec');
   if (sessionId) {
@@ -79,6 +85,59 @@ export function buildCodexArgs(
     args.push('--json', '--color', 'never', '--skip-git-repo-check', prompt);
   }
   return args;
+}
+
+export function buildCodexAppServerThreadParams(
+  codexConfig: CodexBotConfig,
+  cwd: string,
+  model: string | undefined,
+): Record<string, unknown> {
+  return {
+    cwd,
+    ...(model ? { model } : {}),
+    approvalPolicy: codexConfig.dangerouslyBypassApprovalsAndSandbox
+      ? 'never'
+      : (codexConfig.approvalPolicy ?? 'never'),
+    sandbox: codexConfig.dangerouslyBypassApprovalsAndSandbox
+      ? 'danger-full-access'
+      : (codexConfig.sandbox ?? 'workspace-write'),
+    developerInstructions: INDEPENDENT_JUDGMENT_POLICY,
+  };
+}
+
+export function buildCodexAppServerTurnParams(
+  threadId: string,
+  cwd: string,
+  model: string | undefined,
+  input: string,
+  reasoningEffort?: CodexReasoningEffort,
+): Record<string, unknown> {
+  return {
+    threadId,
+    cwd,
+    ...(model ? { model } : {}),
+    ...(reasoningEffort ? { effort: reasoningEffort } : {}),
+    input: [{ type: 'text', text: input }],
+  };
+}
+
+type CodexQuotaInfo = NonNullable<SDKMessage['quotaInfo']>;
+
+function quotaInfoFromSession(quota: CodexQuota | null | undefined): CodexQuotaInfo | undefined {
+  if (!quota?.primary) return undefined;
+  return {
+    usedPct: quota.primary.usedPct,
+    hoursToReset: quota.primary.hoursToReset,
+    label: quota.primary.label,
+    secondary: quota.secondary,
+  };
+}
+
+export async function resolveCodexQuotaInfo(
+  sessionQuota: CodexQuota | null | undefined,
+  readFreshAccountQuota: () => Promise<CodexQuotaInfo | undefined>,
+): Promise<CodexQuotaInfo | undefined> {
+  return quotaInfoFromSession(sessionQuota) ?? readFreshAccountQuota();
 }
 
 export class CodexExecutor {
@@ -99,13 +158,22 @@ export class CodexExecutor {
     const { prompt, cwd, sessionId, abortController, outputsDir, apiContext } = options;
     const codexConfig = this.config.codex ?? {};
     const model = options.model ?? codexConfig.model;
+    const reasoningEffort = resolveCodexReasoningEffort(codexConfig, model, options.codexReasoningEffort).effort;
     const fullPrompt = this.buildPromptWithContext(prompt, outputsDir, apiContext);
     const queue = new AsyncQueue<SDKMessage>();
     const state = createCodexTranslatorState({
       model: model || codexConfig.displayModel,
       contextWindow: codexConfig.contextWindow,
     });
-    const args = buildCodexArgs(codexConfig, cwd, fullPrompt, sessionId, model);
+    const args = buildCodexArgs(
+      codexConfig,
+      cwd,
+      fullPrompt,
+      sessionId,
+      model,
+      options.codexContextMode,
+      reasoningEffort,
+    );
     const startTime = Date.now();
     let lastActivityAt = startTime;
     let lastActivityMessageAt = 0;
@@ -119,7 +187,16 @@ export class CodexExecutor {
     // quota is not present in the `exec --json` stdout stream.
     let pendingResult: SDKMessage | undefined;
 
-    this.logger.info({ cwd, hasSession: !!sessionId, outputsDir, engine: 'codex' }, 'Starting Codex execution');
+    this.logger.info(
+      {
+        cwd,
+        hasSession: !!sessionId,
+        outputsDir,
+        engine: 'codex',
+        judgmentPolicyVersion: INDEPENDENT_JUDGMENT_POLICY_VERSION,
+      },
+      'Starting Codex execution',
+    );
 
     const finishWithError = (message: string): void => {
       if (sawResult) return;
@@ -221,7 +298,7 @@ export class CodexExecutor {
         finishWithError(err.message);
         queue.finish();
       });
-      child.on('close', (code, signal) => {
+      child.on('close', async (code, signal) => {
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         if (stdoutBuffer.trim()) {
           try {
@@ -239,15 +316,16 @@ export class CodexExecutor {
         // cumulative session total; we override with last_token_usage so the
         // ctx footer reflects current occupation (and tracks compaction).
         if (pendingResult) {
+          pendingResult.reasoningEffort = reasoningEffort;
           try {
-            const status = readCodexSessionStatus(state.sessionId ?? sessionId);
-            if (status?.quota?.primary) {
-              pendingResult.quotaInfo = {
-                usedPct: status.quota.primary.usedPct,
-                hoursToReset: status.quota.primary.hoursToReset,
-                secondary: status.quota.secondary,
-              };
+            const status = readCodexSessionStatus(state.sessionId ?? sessionId, state.model);
+            if (status?.reasoningEffort) {
+              pendingResult.reasoningEffort = status.reasoningEffort;
             }
+            pendingResult.quotaInfo = await resolveCodexQuotaInfo(
+              status?.quota,
+              () => this.readCodexAccountQuota(codexConfig, state.model),
+            );
             const mu = state.model ? pendingResult.modelUsage?.[state.model] : undefined;
             if (mu && status?.lastTurnInputTokens !== undefined) {
               mu.inputTokens = status.lastTurnInputTokens;
@@ -334,6 +412,7 @@ export class CodexExecutor {
     const { prompt, cwd, sessionId, abortController, outputsDir, apiContext } = options;
     const codexConfig = this.config.codex ?? {};
     const model = options.model ?? codexConfig.model;
+    const reasoningEffort = resolveCodexReasoningEffort(codexConfig, model, options.codexReasoningEffort).effort;
     const fullPrompt = this.buildPromptWithContext(prompt, outputsDir, apiContext);
     const goalObjective = options.codexGoal
       ? this.buildPromptWithContext(options.codexGoal.objective, outputsDir, apiContext)
@@ -346,6 +425,8 @@ export class CodexExecutor {
     if (options.codexGoal) enableCodexAppServerGoalOperation(state);
     const client = new CodexAppServerClient({
       codexConfig,
+      contextMode: options.codexContextMode,
+      reasoningEffort,
       logger: this.logger,
       botName: this.config.name,
     });
@@ -355,7 +436,17 @@ export class CodexExecutor {
     let initEmitted = false;
     let goalStartResolve: ((turnId: string) => void) | undefined;
 
-    this.logger.info({ cwd, hasSession: !!sessionId, outputsDir, engine: 'codex', transport: 'app-server' }, 'Starting Codex app-server execution');
+    this.logger.info(
+      {
+        cwd,
+        hasSession: !!sessionId,
+        outputsDir,
+        engine: 'codex',
+        transport: 'app-server',
+        judgmentPolicyVersion: INDEPENDENT_JUDGMENT_POLICY_VERSION,
+      },
+      'Starting Codex app-server execution',
+    );
 
     const finishWithError = (message: string): void => {
       if (finished) return;
@@ -391,7 +482,15 @@ export class CodexExecutor {
           activeThreadId = message.session_id;
         }
         if (message.type === 'result') {
-          queue.enqueue(this.enrichAppServerResult(message, state.threadId ?? activeThreadId, codexConfig, state.model));
+          queue.enqueue(
+            this.enrichAppServerResult(
+              message,
+              state.threadId ?? activeThreadId,
+              codexConfig,
+              state.model,
+              reasoningEffort,
+            ),
+          );
         } else {
           queue.enqueue(message);
         }
@@ -410,19 +509,17 @@ export class CodexExecutor {
       else finishWithError('Codex app-server ended before the turn completed');
     });
 
-    const threadParams = (): Record<string, unknown> => ({
-      cwd,
-      ...(model ? { model } : {}),
-      approvalPolicy: codexConfig.dangerouslyBypassApprovalsAndSandbox
-        ? 'never'
-        : (codexConfig.approvalPolicy ?? 'never'),
-      sandbox: codexConfig.dangerouslyBypassApprovalsAndSandbox
-        ? 'danger-full-access'
-        : (codexConfig.sandbox ?? 'workspace-write'),
-    });
+    const threadParams = (): Record<string, unknown> => buildCodexAppServerThreadParams(codexConfig, cwd, model);
 
     const run = async (): Promise<void> => {
       await client.start();
+
+      try {
+        const snapshot = await client.request<Record<string, unknown>>('account/rateLimits/read', {}, 15_000);
+        applyCodexRateLimitsSnapshot(snapshot, state);
+      } catch (err) {
+        this.logger.debug({ err }, 'Codex app-server rate-limit snapshot read failed; using rolling updates');
+      }
 
       if (abortController.signal.aborted) {
         finishWithError('Task was stopped');
@@ -431,11 +528,15 @@ export class CodexExecutor {
 
       if (activeThreadId) {
         try {
-          await client.request('thread/resume', {
-            ...threadParams(),
-            threadId: activeThreadId,
-            excludeTurns: true,
-          }, 30_000);
+          await client.request(
+            'thread/resume',
+            {
+              ...threadParams(),
+              threadId: activeThreadId,
+              excludeTurns: true,
+            },
+            30_000,
+          );
           state.threadId = activeThreadId;
           if (!initEmitted) {
             initEmitted = true;
@@ -462,15 +563,22 @@ export class CodexExecutor {
       }
 
       try {
-        const result = await client.request<{ goal?: typeof state.goal }>('thread/goal/get', {
-          threadId: activeThreadId,
-        }, 15_000);
+        const result = await client.request<{ goal?: typeof state.goal }>(
+          'thread/goal/get',
+          {
+            threadId: activeThreadId,
+          },
+          15_000,
+        );
         state.goal = result.goal ?? null;
         state.goalObservedAt = Date.now();
         const progress = buildCodexAppServerGoalProgressMessage(state, 'goal loaded');
         if (progress) queue.enqueue(progress);
       } catch (err) {
-        this.logger.debug({ err, threadId: activeThreadId }, 'Codex app-server goal read failed; continuing without goal progress card');
+        this.logger.debug(
+          { err, threadId: activeThreadId },
+          'Codex app-server goal read failed; continuing without goal progress card',
+        );
       }
 
       if (options.codexGoal && goalObjective) {
@@ -485,30 +593,30 @@ export class CodexExecutor {
             const progress = buildCodexAppServerGoalProgressMessage(state, 'goal active');
             if (progress) queue.enqueue(progress);
           },
-          waitForStart: () => new Promise<string>((resolve, reject) => {
-            if (activeTurnId) {
-              resolve(activeTurnId);
-              return;
-            }
-            const timer = setTimeout(() => {
-              goalStartResolve = undefined;
-              reject(new Error('Timed out waiting for Codex goal runtime-generated first turn'));
-            }, 30_000);
-            goalStartResolve = (turnId: string) => {
-              clearTimeout(timer);
-              resolve(turnId);
-            };
-          }),
+          waitForStart: () =>
+            new Promise<string>((resolve, reject) => {
+              if (activeTurnId) {
+                resolve(activeTurnId);
+                return;
+              }
+              const timer = setTimeout(() => {
+                goalStartResolve = undefined;
+                reject(new Error('Timed out waiting for Codex goal runtime-generated first turn'));
+              }, 30_000);
+              goalStartResolve = (turnId: string) => {
+                clearTimeout(timer);
+                resolve(turnId);
+              };
+            }),
         });
         return;
       }
 
-      const turn = await client.request<{ turn: { id: string } }>('turn/start', {
-        threadId: activeThreadId,
-        cwd,
-        ...(model ? { model } : {}),
-        input: [{ type: 'text', text: fullPrompt }],
-      }, 30_000);
+      const turn = await client.request<{ turn: { id: string } }>(
+        'turn/start',
+        buildCodexAppServerTurnParams(activeThreadId, cwd, model, fullPrompt, reasoningEffort),
+        30_000,
+      );
       activeTurnId = turn.turn.id;
     };
 
@@ -520,11 +628,13 @@ export class CodexExecutor {
       if (finished) return;
       if (activeThreadId && client.isInitialized()) {
         if (options.codexGoal) {
-          client.request('thread/goal/set', { threadId: activeThreadId, status: 'paused' }, 5_000)
+          client
+            .request('thread/goal/set', { threadId: activeThreadId, status: 'paused' }, 5_000)
             .catch((err) => this.logger.debug({ err }, 'Codex app-server goal pause failed'));
         }
         if (activeTurnId) {
-          client.request('turn/interrupt', { threadId: activeThreadId, turnId: activeTurnId }, 5_000)
+          client
+            .request('turn/interrupt', { threadId: activeThreadId, turnId: activeTurnId }, 5_000)
             .catch((err) => this.logger.debug({ err }, 'Codex app-server turn interrupt failed'));
         }
       }
@@ -539,12 +649,19 @@ export class CodexExecutor {
 
     return {
       stream: queue[Symbol.asyncIterator]() as AsyncGenerator<SDKMessage>,
+      getLastActivityAt: () => client.getLastActivityAt(),
       sendAnswer: (_toolUseId: string, _sid: string, _answerText: string) => {
-        this.logger.warn({ engine: 'codex', transport: 'app-server' }, 'sendAnswer called on Codex app-server executor — not implemented');
+        this.logger.warn(
+          { engine: 'codex', transport: 'app-server' },
+          'sendAnswer called on Codex app-server executor — not implemented',
+        );
         finishWithError('Codex app-server interactive answers are not supported yet.');
       },
       resolveQuestion: (_toolUseId: string, _answers: Record<string, string>) => {
-        this.logger.warn({ engine: 'codex', transport: 'app-server' }, 'resolveQuestion called on Codex app-server executor — not implemented');
+        this.logger.warn(
+          { engine: 'codex', transport: 'app-server' },
+          'resolveQuestion called on Codex app-server executor — not implemented',
+        );
         finishWithError('Codex app-server interactive questions are not supported yet.');
       },
       finish,
@@ -559,14 +676,24 @@ export class CodexExecutor {
     onGoalSet?: (goal: CodexGoal) => void;
     waitForStart: () => Promise<string>;
   }): Promise<void> {
-    await opts.client.request('thread/goal/clear', { threadId: opts.threadId }, 15_000)
-      .catch((err) => this.logger.debug({ err, threadId: opts.threadId }, 'Codex goal clear before replace failed; continuing with goal set'));
-    const result = await opts.client.request<{ goal?: CodexGoal | null }>('thread/goal/set', {
-      threadId: opts.threadId,
-      objective: opts.objective,
-      status: 'active',
-      ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
-    }, 15_000);
+    await opts.client
+      .request('thread/goal/clear', { threadId: opts.threadId }, 15_000)
+      .catch((err) =>
+        this.logger.debug(
+          { err, threadId: opts.threadId },
+          'Codex goal clear before replace failed; continuing with goal set',
+        ),
+      );
+    const result = await opts.client.request<{ goal?: CodexGoal | null }>(
+      'thread/goal/set',
+      {
+        threadId: opts.threadId,
+        objective: opts.objective,
+        status: 'active',
+        ...(opts.tokenBudget !== undefined ? { tokenBudget: opts.tokenBudget } : {}),
+      },
+      15_000,
+    );
     if (result.goal) opts.onGoalSet?.(result.goal);
     await opts.waitForStart();
   }
@@ -576,17 +703,23 @@ export class CodexExecutor {
     sessionId: string | undefined,
     codexConfig: CodexBotConfig,
     model: string | undefined,
+    resolvedReasoningEffort: CodexReasoningEffort | undefined,
   ): SDKMessage {
+    message.reasoningEffort = resolvedReasoningEffort;
+    const modelName = model || codexConfig.model || codexConfig.displayModel;
     try {
-      const status = readCodexSessionStatus(sessionId);
+      const status = readCodexSessionStatus(sessionId, modelName);
+      if (status?.reasoningEffort) {
+        message.reasoningEffort = status.reasoningEffort;
+      }
       if (!message.quotaInfo && status?.quota?.primary) {
         message.quotaInfo = {
           usedPct: status.quota.primary.usedPct,
           hoursToReset: status.quota.primary.hoursToReset,
+          label: status.quota.primary.label,
           secondary: status.quota.secondary,
         };
       }
-      const modelName = model || codexConfig.model || codexConfig.displayModel;
       const mu = modelName ? message.modelUsage?.[modelName] : undefined;
       if (mu && status?.lastTurnInputTokens !== undefined) {
         mu.inputTokens = status.lastTurnInputTokens;
@@ -597,6 +730,29 @@ export class CodexExecutor {
       this.logger.warn({ err }, 'Codex app-server session status read failed (non-fatal, footer degraded)');
     }
     return message;
+  }
+
+  private async readCodexAccountQuota(
+    codexConfig: CodexBotConfig,
+    model: string | undefined,
+  ): Promise<CodexQuotaInfo | undefined> {
+    const client = new CodexAppServerClient({
+      codexConfig,
+      logger: this.logger,
+      botName: this.config.name,
+    });
+    try {
+      await client.start();
+      const snapshot = await client.request<Record<string, unknown>>('account/rateLimits/read', {}, 15_000);
+      const state = createCodexAppServerTranslatorState({ model });
+      applyCodexRateLimitsSnapshot(snapshot, state);
+      return state.quotaInfo;
+    } catch (err) {
+      this.logger.debug({ err }, 'Codex account rate-limit refresh failed; omitting stale quota');
+      return undefined;
+    } finally {
+      client.close();
+    }
   }
 
   private buildPromptWithContext(

@@ -419,3 +419,12 @@ When implementing a feature or fixing a bug, follow this end-to-end workflow unl
 5. **CI** — Wait for CI checks to pass (check with `gh pr checks`). Fix any failures.
 6. **Merge** — Once CI is green, merge via `gh pr merge --squash --delete-branch`.
 7. **Sync dev** — After merge, sync dev: `git checkout dev && git merge main && git push`.
+
+### Antigravity effort command
+
+`/effort` routes by the active engine. Antigravity overrides are stored as `antigravityReasoningEffort` in `SessionManager` and forwarded in `ExecutorOptions` through all chat/API/recovery paths. The executor validates the CLI value and passes one `--effort`; it never mutates bot configuration. Command mutation verifies model-family variants from the currently selected account's catalog, rechecks state after async lookup, refuses busy tasks and persistence errors, and detaches the old conversation on changes. `/reset` preserves the preference; `/model reset` clears it. `/status` reports the requested setting, not measured reasoning.
+
+
+### Consensus cancellation and preference isolation
+
+`orchestrator/consensus-control.ts` owns live run AbortControllers by exact task ID and origin chat plus eligible bots. Routes register before launching; `/stop` / exact `stop` and the specific stop API use the same controller. The bridge forwards abort to its current execution handle; session recovery and later orchestrator phases are gated. The terminal outcome is frozen before final card delivery; cancellation is `cancelled` / `aborted`, not success. Source chat preferences are seeded atomically once into a new isolated session, never its native session ID or usage. Production initializes persistent quota health at startup; offline fixtures use in-memory health unless explicitly given a temporary path. Do not weaken replay guards or confuse stop requests with rollback of tool side effects.

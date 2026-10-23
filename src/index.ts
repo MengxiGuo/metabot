@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { loadAppConfig, type BotConfig } from './config.js';
 import { createLogger, type Logger } from './utils/logger.js';
+import { sharedAntigravityQuotaHealth } from './engines/antigravity/quota-failover.js';
 import { createEventDispatcher } from './feishu/event-handler.js';
 import { MessageSender } from './feishu/message-sender.js';
 import { FeishuSenderAdapter } from './feishu/feishu-sender-adapter.js';
@@ -20,6 +21,7 @@ import { startApiServer } from './api/http-server.js';
 import { startMemoryServer } from './memory/memory-server.js';
 import { DocSync } from './sync/doc-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
+import { reconcileCatchupSkillsToWorkDirs } from './api/skills-installer.js';
 
 import { SessionRegistry } from './session/session-registry.js';
 
@@ -117,6 +119,10 @@ async function startFeishuBot(
 async function main() {
   const appConfig = loadAppConfig();
   const logger = createLogger(appConfig.log.level);
+  sharedAntigravityQuotaHealth.enablePersistence(
+    path.join(process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot'), 'antigravity-quota-health.json'),
+    () => logger.warn('Antigravity quota persistence unavailable; current-process cooldown remains active'),
+  );
 
   // Ensure MEMORY_SECRET env var is available for Claude subprocesses (used by metamemory skill)
   if (appConfig.memory.secret && !process.env.MEMORY_SECRET) {
@@ -135,6 +141,23 @@ async function main() {
     },
     'Starting MetaBot bridge...',
   );
+
+  const configuredWorkDirs = [
+    ...appConfig.feishuBots,
+    ...appConfig.telegramBots,
+    ...appConfig.webBots,
+    ...appConfig.wechatBots,
+  ].map((bot) => bot.claude.defaultWorkingDirectory);
+  try {
+    reconcileCatchupSkillsToWorkDirs(configuredWorkDirs, logger);
+  } catch (err: any) {
+    // Catchup discovery must be repaired, but it must not take down the user's
+    // primary MetaBot communication channel during startup.
+    logger.error(
+      { err: err?.message || String(err), workDirCount: configuredWorkDirs.length },
+      'Catchup skill reconciliation failed; continuing MetaBot startup',
+    );
+  }
 
   // Create bot registry
   const registry = new BotRegistry();

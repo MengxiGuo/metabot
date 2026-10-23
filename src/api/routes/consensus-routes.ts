@@ -4,6 +4,7 @@ import type { RouteContext } from './types.js';
 import { ConsensusOrchestrator, type ConsensusInput } from '../../orchestrator/consensus.js';
 import { resolveConsensusRequest, type ResolvedConsensusRequest } from '../../orchestrator/consensus-profile.js';
 import type { ProblemType, Stakes } from '../../orchestrator/types.js';
+import { consensusControl } from '../../orchestrator/consensus-control.js';
 
 const VALID_TYPES: ProblemType[] = ['empirical', 'architectural', 'preference'];
 const VALID_STAKES: Stakes[] = ['low', 'medium', 'high'];
@@ -17,6 +18,21 @@ export async function handleConsensusRoutes(
 ): Promise<boolean> {
   const { registry, logger, asyncTaskStore } = ctx;
   const consensusProfiles = ctx.consensusProfiles ?? {};
+
+  const stopMatch = /^\/api\/consensus\/([a-zA-Z0-9-]+)\/stop$/.exec(url);
+  if (method === 'POST' && stopMatch) {
+    const task = asyncTaskStore.get(stopMatch[1]);
+    if (!task || task.botName !== 'consensus-orchestrator') {
+      jsonResponse(res, 404, { error: 'Consensus task not found' });
+    } else if (['completed', 'failed', 'cancelled'].includes(task.status)) {
+      jsonResponse(res, 200, { taskId: task.id, status: task.status });
+    } else if (consensusControl.stop(task.id)) {
+      jsonResponse(res, 202, { taskId: task.id, status: 'stopping' });
+    } else {
+      jsonResponse(res, 409, { error: 'Consensus is finalizing or has no live controller' });
+    }
+    return true;
+  }
 
   // GET /api/consensus/profiles — list configured named presets
   if (method === 'GET' && url === '/api/consensus/profiles') {
@@ -38,7 +54,7 @@ export async function handleConsensusRoutes(
   if (method === 'GET' && url.startsWith('/api/consensus/')) {
     const taskId = url.slice('/api/consensus/'.length);
     const task = asyncTaskStore.get(taskId);
-    if (!task) {
+    if (!task || task.botName !== 'consensus-orchestrator') {
       jsonResponse(res, 404, { error: `Consensus task not found: ${taskId}` });
       return true;
     }
@@ -141,6 +157,10 @@ export async function handleConsensusRoutes(
       ...(chatId !== undefined ? { chatId } : {}),
       ...(callerBotName !== undefined ? { callerBotName } : {}),
       ...(synthesizerBot !== undefined ? { synthesizerBot } : {}),
+      signal: consensusControl.register(asyncTask.id, chatId,
+        [...bots, ...(callerBotName ? [callerBotName] : []), ...(synthesizerBot ? [synthesizerBot] : [])],
+        () => asyncTaskStore.update(asyncTask.id, { status: 'stopping' })),
+      onSettled: () => consensusControl.finish(asyncTask.id),
     };
 
     logger.info(
@@ -169,7 +189,7 @@ export async function handleConsensusRoutes(
         });
 
         asyncTaskStore.update(asyncTask.id, {
-          status: output.status === 'consensus_reached' ? 'completed' : 'failed',
+          status: output.status === 'aborted' ? 'cancelled' : output.status === 'consensus_reached' ? 'completed' : 'failed',
           completedAt: Date.now(),
           result: {
             success: output.status === 'consensus_reached',
@@ -181,10 +201,12 @@ export async function handleConsensusRoutes(
       } catch (err: any) {
         logger.error({ err: err.message, taskId: asyncTask.id }, 'Consensus orchestrator threw');
         asyncTaskStore.update(asyncTask.id, {
-          status: 'failed',
+          status: input.signal?.aborted ? 'cancelled' : 'failed',
           completedAt: Date.now(),
           result: { success: false, responseText: '', error: err.message },
         });
+      } finally {
+        consensusControl.finish(asyncTask.id);
       }
     })();
 

@@ -53,15 +53,18 @@ export class StreamProcessor {
   private _sdkHandledTools: DetectedTool[] = [];
   private _planFilePath: string | null = null;
   private _model: string | undefined;
+  private _reasoningEffort: CardState['reasoningEffort'];
   private _totalTokens: number | undefined;
   private _contextWindow: number | undefined;
-  private _quotaInfo: {
-    usedPct: number;
-    hoursToReset: number;
-    label?: string;
-    secondary?: { usedPct: number; hoursToReset: number; label?: string };
-    tertiary?: { usedPct: number; hoursToReset: number; label?: string };
-  } | undefined;
+  private _quotaInfo:
+    | {
+        usedPct: number;
+        hoursToReset: number;
+        label?: string;
+        secondary?: { usedPct: number; hoursToReset: number; label?: string };
+        tertiary?: { usedPct: number; hoursToReset: number; label?: string };
+      }
+    | undefined;
   // Track per-API-call usage from stream events for accurate context window display
   private _lastInputTokens: number | undefined;
   private _lastOutputTokens: number | undefined;
@@ -76,7 +79,9 @@ export class StreamProcessor {
   private _syncResponseText(): void {
     const joined = this._segments.join('\n\n');
     this.responseText = this._streamingText
-      ? (joined ? joined + '\n\n' + this._streamingText : this._streamingText)
+      ? joined
+        ? joined + '\n\n' + this._streamingText
+        : this._streamingText
       : joined;
   }
 
@@ -134,9 +139,14 @@ export class StreamProcessor {
 
     // Determine running status
     const hasActiveTools = this.toolCalls.some((t) => t.status === 'running');
-    const status = this._pendingQuestions.length > 0
-      ? 'waiting_for_input'
-      : hasActiveTools || this._engineActive ? 'running' : this.responseText ? 'running' : 'thinking';
+    const status =
+      this._pendingQuestions.length > 0
+        ? 'waiting_for_input'
+        : hasActiveTools || this._engineActive
+          ? 'running'
+          : this.responseText
+            ? 'running'
+            : 'thinking';
 
     return {
       status,
@@ -147,9 +157,7 @@ export class StreamProcessor {
       durationMs: this.durationMs,
       pendingQuestion: this._pendingQuestions[0] || undefined,
       goalProgress: this._goalProgress,
-      backgroundEvents: this._backgroundEvents.size > 0
-        ? [...this._backgroundEvents.values()]
-        : undefined,
+      backgroundEvents: this._backgroundEvents.size > 0 ? [...this._backgroundEvents.values()] : undefined,
     };
   }
 
@@ -178,16 +186,19 @@ export class StreamProcessor {
 
     const prior = this._backgroundEvents.get(taskId);
     const patch = (m.patch as Record<string, unknown> | undefined) ?? undefined;
-    const description = typeof m.description === 'string'
-      ? m.description
-      : (typeof patch?.description === 'string' ? patch.description as string : prior?.description);
+    const description =
+      typeof m.description === 'string'
+        ? m.description
+        : typeof patch?.description === 'string'
+          ? (patch.description as string)
+          : prior?.description;
 
     let status: BackgroundTaskStatus = prior?.status ?? 'running';
     if (subtype === 'task_notification') {
       const s = typeof m.status === 'string' ? m.status : undefined;
       if (s === 'completed' || s === 'failed' || s === 'stopped') status = s;
     } else if (subtype === 'task_updated') {
-      const s = typeof patch?.status === 'string' ? patch.status as string : undefined;
+      const s = typeof patch?.status === 'string' ? (patch.status as string) : undefined;
       if (s === 'completed') status = 'completed';
       else if (s === 'failed' || s === 'killed') status = 'failed';
       else if (s === 'running') status = 'running';
@@ -262,9 +273,8 @@ export class StreamProcessor {
     if (event.type === 'message_start') {
       const usage = (event as any).message?.usage;
       if (usage) {
-        this._lastInputTokens = (usage.input_tokens ?? 0)
-          + (usage.cache_read_input_tokens ?? 0)
-          + (usage.cache_creation_input_tokens ?? 0);
+        this._lastInputTokens =
+          (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
       }
     } else if (event.type === 'message_delta') {
       const usage = (event as any).usage;
@@ -304,6 +314,7 @@ export class StreamProcessor {
     this.costUsd = message.total_cost_usd;
     this.durationMs = message.duration_ms;
     if (message.quotaInfo) this._quotaInfo = message.quotaInfo;
+    if (message.reasoningEffort) this._reasoningEffort = message.reasoningEffort;
 
     // Extract model usage info (per-model breakdown from SDK)
     if (message.modelUsage) {
@@ -311,7 +322,7 @@ export class StreamProcessor {
       if (models.length > 0) {
         // Primary model is the one with highest cost
         const primaryModel = models.reduce((a, b) =>
-          (message.modelUsage![a].costUSD ?? 0) >= (message.modelUsage![b].costUSD ?? 0) ? a : b
+          (message.modelUsage![a].costUSD ?? 0) >= (message.modelUsage![b].costUSD ?? 0) ? a : b,
         );
         const mu = message.modelUsage[primaryModel];
         this._model = primaryModel;
@@ -323,8 +334,8 @@ export class StreamProcessor {
         } else {
           let totalTokens = 0;
           for (const m of models) {
-            totalTokens += (message.modelUsage![m].inputTokens ?? 0);
-            totalTokens += (message.modelUsage![m].outputTokens ?? 0);
+            totalTokens += message.modelUsage![m].inputTokens ?? 0;
+            totalTokens += message.modelUsage![m].outputTokens ?? 0;
           }
           this._totalTokens = totalTokens;
         }
@@ -341,32 +352,34 @@ export class StreamProcessor {
     // before and after a tool call would lose the earlier (often the substantive)
     // part. this.responseText holds the full accumulation; fall back to result only
     // if it is somehow longer (e.g. accumulation missed something).
-    const fullText = this.responseText && this.responseText.length >= (message.result || '').length
-      ? this.responseText
-      : (message.result || this.responseText);
+    const fullText =
+      this.responseText && this.responseText.length >= (message.result || '').length
+        ? this.responseText
+        : message.result || this.responseText;
     const resultText = stripLeakedToolCalls(fullText);
     const isError = message.subtype !== 'success';
     // SDK sometimes wraps API errors as "success" with the error text as result
     const isApiError = !isError && isApiErrorResult(resultText);
 
     return {
-      status: (isError || isApiError) ? 'error' : 'complete',
+      status: isError || isApiError ? 'error' : 'complete',
       userPrompt: this.userPrompt,
       responseText: isApiError ? '' : resultText,
       toolCalls: [...this.toolCalls],
       costUsd: this.costUsd,
       durationMs: this.durationMs,
       errorMessage: isError
-        ? (message.errors?.join('; ') || `Ended with: ${message.subtype}`)
-        : isApiError ? resultText : undefined,
+        ? message.errors?.join('; ') || `Ended with: ${message.subtype}`
+        : isApiError
+          ? resultText
+          : undefined,
       model: this._model,
+      reasoningEffort: this._reasoningEffort,
       totalTokens: this._totalTokens,
       contextWindow: this._contextWindow,
       quotaInfo: this._quotaInfo,
       goalProgress: this._goalProgress,
-      backgroundEvents: this._backgroundEvents.size > 0
-        ? [...this._backgroundEvents.values()]
-        : undefined,
+      backgroundEvents: this._backgroundEvents.size > 0 ? [...this._backgroundEvents.values()] : undefined,
     };
   }
 
@@ -392,9 +405,7 @@ export class StreamProcessor {
 
   private completeCurrentTool(): void {
     if (this.currentToolName) {
-      const tool = this.toolCalls.find(
-        (t) => t.name === this.currentToolName && t.status === 'running',
-      );
+      const tool = this.toolCalls.find((t) => t.name === this.currentToolName && t.status === 'running');
       if (tool) {
         tool.status = 'done';
       }
@@ -450,9 +461,14 @@ export class StreamProcessor {
   /** Return the current card state without processing a new message. */
   getCurrentState(): CardState {
     const hasActiveTools = this.toolCalls.some((t) => t.status === 'running');
-    const status = this._pendingQuestions.length > 0
-      ? 'waiting_for_input'
-      : hasActiveTools ? 'running' : this.responseText ? 'running' : 'thinking';
+    const status =
+      this._pendingQuestions.length > 0
+        ? 'waiting_for_input'
+        : hasActiveTools
+          ? 'running'
+          : this.responseText
+            ? 'running'
+            : 'thinking';
     return {
       status,
       userPrompt: this.userPrompt,
@@ -460,11 +476,10 @@ export class StreamProcessor {
       toolCalls: [...this.toolCalls],
       costUsd: this.costUsd,
       durationMs: this.durationMs,
+      reasoningEffort: this._reasoningEffort,
       pendingQuestion: this._pendingQuestions[0] || undefined,
       goalProgress: this._goalProgress,
-      backgroundEvents: this._backgroundEvents.size > 0
-        ? [...this._backgroundEvents.values()]
-        : undefined,
+      backgroundEvents: this._backgroundEvents.size > 0 ? [...this._backgroundEvents.values()] : undefined,
     };
   }
 

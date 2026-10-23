@@ -43,9 +43,7 @@ describe('buildCard', () => {
       durationMs: 125_000,
     };
     const json = JSON.parse(buildCard(state));
-    const progress = json.elements.find(
-      (e: any) => e.tag === 'markdown' && e.content.includes('任务仍在执行'),
-    );
+    const progress = json.elements.find((e: any) => e.tag === 'markdown' && e.content.includes('任务仍在执行'));
     expect(progress).toBeDefined();
     expect(progress.content).toContain('已运行 2min');
   });
@@ -64,6 +62,43 @@ describe('buildCard', () => {
     const note = json.elements.find((e: any) => e.tag === 'note');
     expect(note).toBeDefined();
     expect(note.elements[0].content).toContain('5.0s');
+  });
+
+  it('shows the actual Codex reasoning effort in the result footer', () => {
+    const state: CardState = {
+      status: 'complete',
+      userPrompt: 'task',
+      responseText: 'All done!',
+      toolCalls: [],
+      durationMs: 5000,
+      model: 'gpt-6-astra',
+      reasoningEffort: 'xhigh',
+    };
+    const json = JSON.parse(buildCard(state));
+    const note = json.elements.find((e: any) => e.tag === 'note');
+
+    expect(note?.elements[0].content).toBe('gpt-6-astra | effort: xhigh | 5.0s');
+  });
+
+  it('renders the exact Astra footer with the selected weekly quota bucket', () => {
+    const state: CardState = {
+      status: 'complete',
+      userPrompt: 'check quota',
+      responseText: 'Checked.',
+      toolCalls: [],
+      totalTokens: 507_000,
+      contextWindow: 828_000,
+      quotaInfo: { usedPct: 29, hoursToReset: 7 * 24, label: '周' },
+      model: 'gpt-6-astra',
+      reasoningEffort: 'high',
+      durationMs: 184_500,
+    };
+    const json = JSON.parse(buildCard(state));
+    const note = json.elements.find((e: any) => e.tag === 'note');
+
+    expect(note?.elements[0].content).toBe(
+      'ctx: 507.0k/828k (61%) | quota: 周 29.0% (7.0d) | gpt-6-astra | effort: high | 184.5s',
+    );
   });
 
   it('builds error card with error message', () => {
@@ -88,15 +123,17 @@ describe('buildCard', () => {
       toolCalls: [],
       pendingQuestion: {
         toolUseId: 'q1',
-        questions: [{
-          question: 'Which env?',
-          header: 'Deploy',
-          options: [
-            { label: 'Production', description: 'Live environment' },
-            { label: 'Staging', description: 'Test environment' },
-          ],
-          multiSelect: false,
-        }],
+        questions: [
+          {
+            question: 'Which env?',
+            header: 'Deploy',
+            options: [
+              { label: 'Production', description: 'Live environment' },
+              { label: 'Staging', description: 'Test environment' },
+            ],
+            multiSelect: false,
+          },
+        ],
       },
     };
     const json = JSON.parse(buildCard(state));
@@ -141,7 +178,12 @@ describe('buildCard', () => {
       responseText: 'watching…',
       toolCalls: [],
       backgroundEvents: [
-        { taskId: 'bheol4172', description: 'Watching CI for PR #215', status: 'running', lastEvent: 'check (20) running' },
+        {
+          taskId: 'bheol4172',
+          description: 'Watching CI for PR #215',
+          status: 'running',
+          lastEvent: 'check (20) running',
+        },
         { taskId: 'bmkr16j6f', description: 'Watching deploy', status: 'completed', lastEvent: 'CI done: success' },
       ],
     };

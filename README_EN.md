@@ -498,3 +498,16 @@ We open-sourced it because we believe this is how companies will work in the fut
 ## License
 
 [MIT](LICENSE)
+
+### Antigravity per-chat reasoning effort
+
+For the `antigravity` engine, `/effort` shows the requested setting and its source; `/effort list` queries the selected account's available variants for the current model; `/effort high` sets an override; `/effort reset` restores the bot/model default. CLI candidates are low, medium, high, xhigh, max, but a value must exist in the exact account/model catalog before it is saved.
+
+Overrides persist per bot + chat, take precedence over `antigravity.effort`, and are passed through chat, API, and recovery execution paths. Changing effort detaches the old conversation: the next turn starts fresh without inheriting its context. Existing history is not deleted. Unchanged values keep the conversation. Busy tasks and catalog failures leave settings unchanged. `/reset` keeps the preference; `/model reset` clears it. `/status` and `/model` show the requested effort, not a claim about measured internal reasoning. The legacy `gemini` engine is unaffected.
+
+
+### Stopping consensus
+
+Address the initiating bot or a panelist in the origin chat with `/stop` or the exact text `stop` (normal group mention rules still apply). This cancels all associated live consensus runs in that chat and the current ordinary task; other chats and schedules are unaffected when a consensus matches. Use `mb consensus stop <taskId>` or `POST /api/consensus/:taskId/stop` for one specific run. Status transitions from `stopping` to `cancelled`, with result status `aborted`. Cancellation prevents further phases/retries and propagates to participant execution handles; it does not undo completed tool side effects.
+
+New isolated consensus sessions inherit source-chat execution preferences once, without native conversation history. Later phases retain any account failover. Antigravity explicit quota reset durations are persisted with a 60-second reserve, keyed by runner and quota group; unknown reset times retain a five-minute cooldown. Existing no-replay safeguards remain in force.

@@ -4,10 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
-import type { BotConfigBase } from '../../config.js';
+import type { AntigravityReasoningEffort, BotConfigBase, CodexContextMode, CodexReasoningEffort } from '../../config.js';
 import type { GoalProgress } from '../../types.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
+import { INDEPENDENT_JUDGMENT_POLICY, INDEPENDENT_JUDGMENT_POLICY_VERSION } from '../shared/independent-judgment.js';
 import { ModelFallbackManager } from './model-fallback.js';
 import { fetchArkQuotaInfo } from './ark-quota-fetcher.js';
 
@@ -80,29 +81,26 @@ function createSpawnFn(config: ClaudeSpawnConfig): (options: SpawnOptions) => Sp
     // when pointed at a .js entry. Honor it, but fall back to the current Node
     // binary for a bare node/bun request to avoid Windows PATH issues.
     const cmdBase = path.basename(options.command);
-    const cmd = (cmdBase === 'node' || cmdBase === 'bun' || cmdBase === 'node.exe' || cmdBase === 'bun.exe')
-      ? process.execPath
-      : options.command;
+    const cmd =
+      cmdBase === 'node' || cmdBase === 'bun' || cmdBase === 'node.exe' || cmdBase === 'bun.exe'
+        ? process.execPath
+        : options.command;
 
     // Merge provided env with process.env for a complete environment
-    const baseEnv = options.env && Object.keys(options.env).length > 0
-      ? { ...process.env, ...options.env }
-      : { ...process.env };
+    const baseEnv =
+      options.env && Object.keys(options.env).length > 0 ? { ...process.env, ...options.env } : { ...process.env };
 
     // CLAUDE_* vars that should be passed through despite the ALWAYS_FILTERED_PREFIXES rule.
     // BUBBLEWRAP=1 is required for root/sandbox environments where Claude Code
     // refuses to spawn without an explicit sandbox declaration.
-    const CLAUDE_PASSTHROUGH = new Set([
-      'CLAUDE_CODE_BUBBLEWRAP',
-      'CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING',
-    ]);
+    const CLAUDE_PASSTHROUGH = new Set(['CLAUDE_CODE_BUBBLEWRAP', 'CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING']);
 
     // Filter out env vars that interfere with auth or cause nested session errors
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(baseEnv)) {
       if (value === undefined) continue;
-      if (ALWAYS_FILTERED_PREFIXES.some(p => key.startsWith(p)) && !CLAUDE_PASSTHROUGH.has(key)) continue;
-      if (filterAuthVars && AUTH_ENV_VARS.some(v => key.startsWith(v))) continue;
+      if (ALWAYS_FILTERED_PREFIXES.some((p) => key.startsWith(p)) && !CLAUDE_PASSTHROUGH.has(key)) continue;
+      if (filterAuthVars && AUTH_ENV_VARS.some((v) => key.startsWith(v))) continue;
       env[key] = value;
     }
 
@@ -125,7 +123,7 @@ function createSpawnFn(config: ClaudeSpawnConfig): (options: SpawnOptions) => Sp
         const authToken = fs.readFileSync(authTokenFile, 'utf-8').trim();
         if (authToken) env.ANTHROPIC_AUTH_TOKEN = authToken;
       } catch (err: any) {
-        throw new Error(`Failed to read Claude authTokenFile ${authTokenFile}: ${err?.message || err}`);
+        throw new Error(`Failed to read Claude authTokenFile ${authTokenFile}: ${err?.message || err}`, { cause: err });
       }
     }
 
@@ -180,8 +178,8 @@ export function compactSession(
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined) continue;
-    if (ALWAYS_FILTERED_PREFIXES.some(p => key.startsWith(p))) continue;
-    if (filterAuthVars && AUTH_ENV_VARS.some(v => key.startsWith(v))) continue;
+    if (ALWAYS_FILTERED_PREFIXES.some((p) => key.startsWith(p))) continue;
+    if (filterAuthVars && AUTH_ENV_VARS.some((v) => key.startsWith(v))) continue;
     env[key] = value;
   }
   if (process.getuid?.() === 0) env.CLAUDE_CODE_BUBBLEWRAP = '1';
@@ -198,15 +196,22 @@ export function compactSession(
 
     let stdout = '';
     let stderr = '';
-    child.stdout?.on('data', (d) => { stdout += d.toString(); });
-    child.stderr?.on('data', (d) => { stderr += d.toString(); });
+    child.stdout?.on('data', (d) => {
+      stdout += d.toString();
+    });
+    child.stderr?.on('data', (d) => {
+      stderr += d.toString();
+    });
 
     // Safety timeout: 3 minutes (compaction summarizes the whole history)
-    const timeout = setTimeout(() => {
-      child.kill('SIGTERM');
-      logger.warn({ sessionId: sessionId.slice(0, 8) }, '/compact timed out after 3min');
-      resolve({ status: 'error', message: 'Compaction timed out after 3 minutes.' });
-    }, 3 * 60 * 1000);
+    const timeout = setTimeout(
+      () => {
+        child.kill('SIGTERM');
+        logger.warn({ sessionId: sessionId.slice(0, 8) }, '/compact timed out after 3min');
+        resolve({ status: 'error', message: 'Compaction timed out after 3 minutes.' });
+      },
+      3 * 60 * 1000,
+    );
 
     child.on('error', (err) => {
       clearTimeout(timeout);
@@ -216,7 +221,7 @@ export function compactSession(
 
     child.on('close', (code) => {
       clearTimeout(timeout);
-      let result = '';
+      let result: string;
       try {
         const parsed = JSON.parse(stdout);
         result = (parsed.result || '').toString();
@@ -262,6 +267,16 @@ export interface ExecutorOptions {
   model?: string;
   /** Override allowed tools for this execution (empty array = no tools). */
   allowedTools?: string[];
+  /** Process-local Codex context override selected for this chat. */
+  codexContextMode?: CodexContextMode;
+  /** Per-chat Codex reasoning override. Undefined uses model/bot/Codex defaults. */
+  codexReasoningEffort?: CodexReasoningEffort;
+  /** Manually selected Antigravity account alias for this chat. */
+  antigravityAccount?: string;
+  /** Persist account selection and detach the old conversation before automatic failover. */
+  onAntigravityAccountSwitch?: (account: string) => void | Promise<void>;
+  /** Per-chat Antigravity effort override; independent of Codex settings. */
+  antigravityReasoningEffort?: AntigravityReasoningEffort;
   /**
    * Start Codex's official app-server goal operation instead of a normal turn.
    * Only meaningful for the Codex app-server transport; other transports ignore it.
@@ -273,6 +288,8 @@ export interface ExecutorOptions {
 }
 
 export type SDKMessage = {
+  /** Internal bounded failover evidence; never raw provider diagnostics. */
+  antigravityFailure?: { quotaExhausted: boolean; safeToRetry: boolean };
   type: string;
   subtype?: string;
   uuid?: string;
@@ -304,6 +321,8 @@ export type SDKMessage = {
     secondary?: { usedPct: number; hoursToReset: number; label?: string };
     tertiary?: { usedPct: number; hoursToReset: number; label?: string };
   };
+  /** Actual Codex reasoning effort observed for this turn. */
+  reasoningEffort?: CodexReasoningEffort;
   /** Official goal-mode progress emitted by engines that expose it. */
   goalProgress?: GoalProgress;
   // Stream event fields
@@ -349,7 +368,13 @@ export class ClaudeExecutor {
     this.fallback = new ModelFallbackManager(config.name, logger);
   }
 
-  private buildQueryOptions(cwd: string, sessionId: string | undefined, abortController: AbortController, outputsDir?: string, apiContext?: ApiContext): Record<string, unknown> {
+  private buildQueryOptions(
+    cwd: string,
+    sessionId: string | undefined,
+    abortController: AbortController,
+    outputsDir?: string,
+    apiContext?: ApiContext,
+  ): Record<string, unknown> {
     const queryOptions: Record<string, unknown> = {
       permissionMode: 'bypassPermissions' as const,
       allowDangerouslySkipPermissions: true,
@@ -376,7 +401,9 @@ export class ClaudeExecutor {
     const appendSections: string[] = [];
 
     if (outputsDir) {
-      appendSections.push(`## Output Files\nWhen producing output files for the user (images, PDFs, documents, archives, code files, etc.), copy them to: ${outputsDir}\nUse \`cp\` via the Bash tool. The bridge will automatically send files placed there to the user.`);
+      appendSections.push(
+        `## Output Files\nWhen producing output files for the user (images, PDFs, documents, archives, code files, etc.), copy them to: ${outputsDir}\nUse \`cp\` via the Bash tool. The bridge will automatically send files placed there to the user.`,
+      );
     }
 
     if (apiContext) {
@@ -384,7 +411,7 @@ export class ClaudeExecutor {
       // race conditions when multiple chats run concurrently.
       // Port and secret are already set as METABOT_* env vars in config.ts.
       appendSections.push(
-        `## MetaBot API\nYou are running as bot "${apiContext.botName}" in chat "${apiContext.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`
+        `## MetaBot API\nYou are running as bot "${apiContext.botName}" in chat "${apiContext.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`,
       );
 
       // Group chat — tell the bot who else is in the group and how to talk to them.
@@ -400,15 +427,19 @@ export class ClaudeExecutor {
         const groupId = apiContext.groupId;
         if (groupId && groupId !== apiContext.chatId) {
           appendSections.push(
-            `## Group Chat\nYou are in a group chat (group: ${groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${groupId}-<botName> "message"\`\nExample: \`mb talk ${others[0]} grouptalk-${groupId}-${others[0]} "hello"\`\nIMPORTANT: Always use the grouptalk-${groupId}-<botName> chatId pattern when talking to other bots in this group.`
+            `## Group Chat\nYou are in a group chat (group: ${groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${groupId}-<botName> "message"\`\nExample: \`mb talk ${others[0]} grouptalk-${groupId}-${others[0]} "hello"\`\nIMPORTANT: Always use the grouptalk-${groupId}-<botName> chatId pattern when talking to other bots in this group.`,
           );
         } else if (others.length > 0) {
           appendSections.push(
-            `## Group Chat\nYou are in a Feishu group chat (chat: ${apiContext.chatId}) with these other bots: ${others.join(', ')}.\nTo talk to one of them with both your prompt and their reply visible in this group, use: \`mb talk <peerBot> ${apiContext.chatId} "<message>"\`\nExample: \`mb talk ${others[0]} ${apiContext.chatId} "hello — what do you think about X?"\`\nIMPORTANT: Use the real chat id (${apiContext.chatId}), NOT a grouptalk- prefix — the latter is for the web UI only and would suppress the caller card.`
+            `## Group Chat\nYou are in a Feishu group chat (chat: ${apiContext.chatId}) with these other bots: ${others.join(', ')}.\nTo talk to one of them with both your prompt and their reply visible in this group, use: \`mb talk <peerBot> ${apiContext.chatId} "<message>"\`\nExample: \`mb talk ${others[0]} ${apiContext.chatId} "hello — what do you think about X?"\`\nIMPORTANT: Use the real chat id (${apiContext.chatId}), NOT a grouptalk- prefix — the latter is for the web UI only and would suppress the caller card.`,
           );
         }
       }
     }
+
+    // This policy is injected on every turn, including resumed sessions. Do
+    // not rely on optional or stale workspace instruction files for P0 behavior.
+    appendSections.push(INDEPENDENT_JUDGMENT_POLICY);
 
     // Feishu output formatting (CRITICAL - injected last so it sits closest to the
     // conversation and overrides any in-context inertia from older transcripts).
@@ -444,7 +475,7 @@ export class ClaudeExecutor {
         '```',
         '',
         'This rule overrides any pipe-table examples that may appear in older parts of this conversation transcript. Going forward, treat pipe tables as a hard error.',
-      ].join('\n')
+      ].join('\n'),
     );
 
     if (appendSections.length > 0) {
@@ -478,17 +509,21 @@ export class ClaudeExecutor {
       queryOptions.resume = sessionId;
     }
 
-    // Beta flags are ignored by the SDK on OAuth/Pro-Max auth. For 1M context,
-    // use the model-name suffix `[1m]` (e.g. `claude-opus-4-7[1m]`) instead.
-    queryOptions.betas = ['context-1m-2025-08-07'];
-
     return queryOptions;
   }
 
   startExecution(options: ExecutorOptions): ExecutionHandle {
     const { prompt, cwd, sessionId, abortController, outputsDir, apiContext } = options;
 
-    this.logger.info({ cwd, hasSession: !!sessionId, outputsDir }, 'Starting Claude execution (multi-turn)');
+    this.logger.info(
+      {
+        cwd,
+        hasSession: !!sessionId,
+        outputsDir,
+        judgmentPolicyVersion: INDEPENDENT_JUDGMENT_POLICY_VERSION,
+      },
+      'Starting Claude execution (multi-turn)',
+    );
 
     const inputQueue = new AsyncQueue<SDKUserMessage>();
 
@@ -537,12 +572,18 @@ export class ClaudeExecutor {
         // Safety timeout: auto-resolve with empty answers after 6 minutes
         // (slightly longer than bridge's 5-minute QUESTION_TIMEOUT_MS) to
         // prevent indefinite hang if the bridge fails to deliver an answer.
-        const timeout = setTimeout(() => {
-          if (pendingQuestionResolvers.delete(id)) {
-            logger.warn({ toolUseId: id }, 'AskUserQuestion hook timed out after 6 minutes — returning empty answers');
-            resolve({});
-          }
-        }, 6 * 60 * 1000);
+        const timeout = setTimeout(
+          () => {
+            if (pendingQuestionResolvers.delete(id)) {
+              logger.warn(
+                { toolUseId: id },
+                'AskUserQuestion hook timed out after 6 minutes — returning empty answers',
+              );
+              resolve({});
+            }
+          },
+          6 * 60 * 1000,
+        );
 
         const onAbort = () => {
           clearTimeout(timeout);
@@ -562,10 +603,12 @@ export class ClaudeExecutor {
     };
 
     queryOptions.hooks = {
-      PreToolUse: [{
-        matcher: 'AskUserQuestion',
-        hooks: [askUserQuestionHook as any],
-      }],
+      PreToolUse: [
+        {
+          matcher: 'AskUserQuestion',
+          hooks: [askUserQuestionHook as any],
+        },
+      ],
     };
 
     const stream = query({
@@ -578,10 +621,11 @@ export class ClaudeExecutor {
     const claudeConfig = this.config.claude;
     const activeModel = (queryOptions.model as string | undefined) ?? this.config.claude.model;
     const configuredModel = this.config.claude.model;
-    const wasProbing = !!configuredModel
-      && configuredModel.includes('opus')
-      && activeModel === configuredModel
-      && fallback.snapshot().degraded;
+    const wasProbing =
+      !!configuredModel &&
+      configuredModel.includes('opus') &&
+      activeModel === configuredModel &&
+      fallback.snapshot().degraded;
 
     async function* wrapStream(): AsyncGenerator<SDKMessage> {
       // Race each stream.next() against the abort signal so we exit immediately on /stop
@@ -590,9 +634,13 @@ export class ClaudeExecutor {
           reject(new DOMException('Aborted', 'AbortError'));
           return;
         }
-        abortController.signal.addEventListener('abort', () => {
-          reject(new DOMException('Aborted', 'AbortError'));
-        }, { once: true });
+        abortController.signal.addEventListener(
+          'abort',
+          () => {
+            reject(new DOMException('Aborted', 'AbortError'));
+          },
+          { once: true },
+        );
       });
 
       const iterator = stream[Symbol.asyncIterator]();
@@ -600,10 +648,7 @@ export class ClaudeExecutor {
 
       try {
         while (true) {
-          const result = await Promise.race([
-            iterator.next(),
-            abortPromise,
-          ]);
+          const result = await Promise.race([iterator.next(), abortPromise]);
           if (result.done) break;
           const msg = result.value as SDKMessage;
           if (msg.type === 'result' && msg.is_error !== true) {
@@ -624,7 +669,11 @@ export class ClaudeExecutor {
       } catch (err: any) {
         if (err.name === 'AbortError' || abortController.signal.aborted) {
           logger.info('Claude execution aborted');
-          try { iterator.return?.(undefined); } catch { /* ignore */ }
+          try {
+            iterator.return?.(undefined);
+          } catch {
+            /* ignore */
+          }
           return;
         }
         const { isQuota } = fallback.classifyError(err);
@@ -643,10 +692,12 @@ export class ClaudeExecutor {
             yield {
               type: 'assistant',
               message: {
-                content: [{
-                  type: 'text',
-                  text: '⚠️ Opus 周配额已用尽，已自动切换到 Sonnet。请重新发送上一条消息（之后约 6 小时内默认走 Sonnet，到时会再尝试 Opus；若已恢复将自动切回）。',
-                }],
+                content: [
+                  {
+                    type: 'text',
+                    text: '⚠️ Opus 周配额已用尽，已自动切换到 Sonnet。请重新发送上一条消息（之后约 6 小时内默认走 Sonnet，到时会再尝试 Opus；若已恢复将自动切回）。',
+                  },
+                ],
               },
             } as SDKMessage;
             return;
@@ -656,10 +707,12 @@ export class ClaudeExecutor {
             yield {
               type: 'assistant',
               message: {
-                content: [{
-                  type: 'text',
-                  text: '⚠️ Opus 与 Sonnet 配额均已用尽。请等到周二 1:00 AM 配额重置后再试。',
-                }],
+                content: [
+                  {
+                    type: 'text',
+                    text: '⚠️ Opus 与 Sonnet 配额均已用尽。请等到周二 1:00 AM 配额重置后再试。',
+                  },
+                ],
               },
             } as SDKMessage;
             return;
@@ -736,9 +789,13 @@ export class ClaudeExecutor {
         reject(new DOMException('Aborted', 'AbortError'));
         return;
       }
-      abortController.signal.addEventListener('abort', () => {
-        reject(new DOMException('Aborted', 'AbortError'));
-      }, { once: true });
+      abortController.signal.addEventListener(
+        'abort',
+        () => {
+          reject(new DOMException('Aborted', 'AbortError'));
+        },
+        { once: true },
+      );
     });
 
     const iterator = stream[Symbol.asyncIterator]();
@@ -747,10 +804,7 @@ export class ClaudeExecutor {
 
     try {
       while (true) {
-        const result = await Promise.race([
-          iterator.next(),
-          abortPromise,
-        ]);
+        const result = await Promise.race([iterator.next(), abortPromise]);
         if (result.done) break;
         const msg = result.value as SDKMessage;
         if (msg.type === 'result' && msg.is_error !== true) {
@@ -766,7 +820,11 @@ export class ClaudeExecutor {
     } catch (err: any) {
       if (err.name === 'AbortError' || abortController.signal.aborted) {
         this.logger.info('Claude execution aborted');
-        try { iterator.return?.(undefined); } catch { /* ignore */ }
+        try {
+          iterator.return?.(undefined);
+        } catch {
+          /* ignore */
+        }
         return;
       }
       throw err;

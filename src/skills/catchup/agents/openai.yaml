@@ -1,0 +1,4 @@
+interface:
+  display_name: "MetaBot Catchup"
+  short_description: "Recover this MetaBot chat from canonical archives."
+  default_prompt: "Use $catchup to recover only the current MetaBot chat through the canonical SG, Mac, and 3060 retention tiers."

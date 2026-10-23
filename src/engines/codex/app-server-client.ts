@@ -1,7 +1,9 @@
 import { execSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import readline from 'node:readline';
-import type { CodexBotConfig } from '../../config.js';
+import type { CodexBotConfig, CodexContextMode, CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
+import { buildCodexContextOverrideArgs } from './context-mode.js';
+import { codexReasoningEffortConfigArg } from './reasoning-effort.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -22,8 +24,23 @@ export interface JsonRpcNotification {
 
 export interface CodexAppServerClientOptions {
   codexConfig: CodexBotConfig;
+  contextMode?: CodexContextMode;
+  reasoningEffort?: CodexReasoningEffort;
   logger: Logger;
   botName: string;
+}
+
+export function buildCodexAppServerArgs(
+  codexConfig: CodexBotConfig,
+  contextMode?: CodexContextMode,
+  reasoningEffort?: CodexReasoningEffort,
+): string[] {
+  const args: string[] = [];
+  if (codexConfig.profile) args.push('--profile', codexConfig.profile);
+  args.push('app-server', '--listen', 'stdio://');
+  args.push(...buildCodexContextOverrideArgs(contextMode));
+  if (reasoningEffort) args.push('-c', codexReasoningEffortConfigArg(reasoningEffort));
+  return args;
 }
 
 interface PendingRequest {
@@ -55,6 +72,7 @@ export class CodexAppServerClient {
   private initialized = false;
   private stderr = '';
   private readonly stderrCapBytes = 64 * 1024;
+  private lastActivityAt = Date.now();
 
   constructor(private opts: CodexAppServerClientOptions) {}
 
@@ -62,7 +80,11 @@ export class CodexAppServerClient {
     if (this.child) return;
 
     const executable = this.opts.codexConfig.executable || resolveCodexPath();
-    const args = ['app-server', '--listen', 'stdio://'];
+    const args = buildCodexAppServerArgs(
+      this.opts.codexConfig,
+      this.opts.contextMode,
+      this.opts.reasoningEffort,
+    );
     const env = {
       ...process.env,
       MB_CALLER_BOT: this.opts.botName,
@@ -77,17 +99,24 @@ export class CodexAppServerClient {
     const rl = readline.createInterface({ input: this.child.stdout });
     rl.on('line', (line) => this.handleLine(line));
     this.child.stderr.on('data', (chunk) => {
+      this.lastActivityAt = Date.now();
       this.stderr += chunk.toString('utf-8');
       if (this.stderr.length > this.stderrCapBytes) {
         this.stderr = this.stderr.slice(-this.stderrCapBytes);
       }
     });
+    // A short-lived or incompatible executable can close its stdin before a
+    // JSON-RPC request is written. Contain EPIPE here so a cosmetic quota
+    // refresh cannot become an uncaught process-level exception.
+    this.child.stdin.on('error', (err) => this.failAll(err));
     this.child.on('error', (err) => this.failAll(err));
     this.child.on('close', (code, signal) => {
       const err = code === 0 || signal === 'SIGTERM'
         ? undefined
         : new Error(`Codex app-server exited with ${signal ? `signal ${signal}` : `code ${code}`}`);
-      if (err) this.failAll(err);
+      if (this.pending.size > 0) {
+        this.failAll(err ?? new Error('Codex app-server exited before completing a pending request'));
+      }
       for (const handler of this.closeHandlers) handler(err);
     });
 
@@ -125,7 +154,9 @@ export class CodexAppServerClient {
         timer,
       });
     });
-    this.child.stdin.write(JSON.stringify(payload) + '\n');
+    this.child.stdin.write(JSON.stringify(payload) + '\n', (err) => {
+      if (err) this.failAll(err);
+    });
     return promise;
   }
 
@@ -154,8 +185,16 @@ export class CodexAppServerClient {
     return this.initialized;
   }
 
+  getLastActivityAt(): number {
+    return this.lastActivityAt;
+  }
+
   private handleLine(line: string): void {
     if (!line.trim()) return;
+    // The translator intentionally suppresses many reasoning/tool events. Raw
+    // app-server traffic still proves the turn is alive and must refresh the
+    // bridge idle watchdog even when no visible card content is emitted.
+    this.lastActivityAt = Date.now();
     let message: any;
     try {
       message = JSON.parse(line);

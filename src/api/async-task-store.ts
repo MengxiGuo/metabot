@@ -14,7 +14,7 @@ export interface AsyncTask {
   botName: string;
   chatId: string;
   prompt: string;
-  status: 'accepted' | 'running' | 'completed' | 'failed';
+  status: 'accepted' | 'running' | 'stopping' | 'cancelled' | 'completed' | 'failed';
   createdAt: number;
   completedAt?: number;
   result?: {

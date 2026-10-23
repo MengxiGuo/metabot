@@ -106,5 +106,9 @@ function defaultModelForEngine(config: BotConfigBase): string | undefined {
       return config.kimi?.model;
     case 'codex':
       return config.codex?.model || config.codex?.displayModel;
+    case 'gemini':
+      return config.gemini?.model || config.gemini?.displayModel;
+    case 'antigravity':
+      return config.antigravity?.model || config.antigravity?.displayModel;
   }
 }

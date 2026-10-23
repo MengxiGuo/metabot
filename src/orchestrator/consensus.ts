@@ -44,6 +44,9 @@ import {
 } from './types.js';
 
 export interface ConsensusInput {
+  signal?: AbortSignal;
+  /** Freeze terminal outcome before posting its final cards. */
+  onSettled?: () => void;
   taskId: string;
   problem: string;
   type: ProblemType;
@@ -69,6 +72,11 @@ type DashboardRole = 'panelist' | 'synthesizer' | 'critic';
 type DashboardRow = { phase: Phase; bot: string; role: DashboardRole };
 
 export class ConsensusOrchestrator {
+  private signal?: AbortSignal;
+  private onSettled?: () => void;
+  private checkCancelled(): void {
+    if (this.signal?.aborted) throw new Error('Consensus stopped by user');
+  }
   private chatId: string | undefined;
   private callerBotName: string | undefined;
   private currentTaskId: string | undefined;
@@ -88,6 +96,8 @@ export class ConsensusOrchestrator {
    * Caller may pass `onEvent` to stream progress (for card heartbeat).
    */
   async run(input: ConsensusInput, onEvent?: ConsensusEventListener): Promise<ConsensusOutput> {
+    this.signal = input.signal;
+    this.onSettled = input.onSettled;
     this.chatId = input.chatId;
     this.callerBotName = input.callerBotName;
     this.currentTaskId = input.taskId;
@@ -95,24 +105,26 @@ export class ConsensusOrchestrator {
 
     const state = this.initState(input);
 
-    // Send the stable dashboard before the first expensive bot call, so the
-    // user gets immediate feedback that the consensus run is alive.
-    const dashboardStarted = await this.renderDashboard(state);
-    if (!dashboardStarted && this.chatId && this.callerBotName) {
-      const fallbackStarted = await this.postDashboardFallbackNotice(
-        state,
-        'Initial dashboard card could not be posted or did not return a message id.',
-      );
-      if (!fallbackStarted) {
-        this.emit(state, 'consensus_failed', { reason: 'dashboard_start_notice_failed' }, onEvent);
-        await this.waitForDashboardUpdates();
-        return this.toOutput(state, 'consensus_failed');
-      }
-    }
-
-    this.emit(state, 'phase_entered', { phase: 0 }, onEvent);
-
     try {
+      this.checkCancelled();
+
+      // Send the stable dashboard before the first expensive bot call, so the
+      // user gets immediate feedback that the consensus run is alive.
+      const dashboardStarted = await this.renderDashboard(state);
+      if (!dashboardStarted && this.chatId && this.callerBotName) {
+        const fallbackStarted = await this.postDashboardFallbackNotice(
+          state,
+          'Initial dashboard card could not be posted or did not return a message id.',
+        );
+        if (!fallbackStarted) {
+          this.emit(state, 'consensus_failed', { reason: 'dashboard_start_notice_failed' }, onEvent);
+          await this.waitForDashboardUpdates();
+          return this.toOutput(state, 'consensus_failed');
+        }
+      }
+
+      this.emit(state, 'phase_entered', { phase: 0 }, onEvent);
+
       // Phase 1 — Independent Take
       state.phase = 1;
       this.emit(state, 'phase_entered', { phase: 1 }, onEvent);
@@ -153,6 +165,8 @@ export class ConsensusOrchestrator {
         await this.runPhase5(state, onEvent);
       }
 
+      this.checkCancelled();
+      input.onSettled?.();
       if (phase4Status === 'escalated') {
         this.emit(state, 'user_escalated', { reason: 'phase4_fork_exhausted' }, onEvent);
         await this.waitForDashboardUpdates();
@@ -165,11 +179,20 @@ export class ConsensusOrchestrator {
       await this.postFinalSnapshot(state, 'consensus_reached');
       return this.toOutput(state, 'consensus_reached');
     } catch (err: any) {
+      if (this.signal?.aborted) {
+        input.onSettled?.();
+        this.emit(state, 'consensus_aborted', { reason: 'user_stop' }, onEvent);
+        await this.waitForDashboardUpdates();
+        await this.postFinalSnapshot(state, 'aborted');
+        return this.toOutput(state, 'aborted');
+      }
       this.logger.error({ err: err.message, taskId: state.taskId }, 'Consensus orchestrator crashed');
       this.emit(state, 'consensus_failed', { reason: 'orchestrator_crash', error: err.message }, onEvent);
       await this.waitForDashboardUpdates();
       await this.postFinalSnapshot(state, 'consensus_failed');
       return this.toOutput(state, 'consensus_failed');
+    } finally {
+      input.onSettled?.();
     }
   }
 
@@ -188,6 +211,7 @@ export class ConsensusOrchestrator {
     const results = await Promise.allSettled(
       state.bots.map((bot) => this.invokePhase1Bot(state, bot, prompt, onEvent)),
     );
+    this.checkCancelled();
 
     // Validate and store; eject bots that failed.
     for (let i = 0; i < state.bots.length; i++) {
@@ -297,6 +321,7 @@ export class ConsensusOrchestrator {
         ),
       ),
     );
+    this.checkCancelled();
 
     for (let i = 0; i < surviving.length; i++) {
       const myBot = surviving[i].bot;
@@ -394,6 +419,7 @@ export class ConsensusOrchestrator {
     const results = await Promise.allSettled(
       bots.map((bot) => this.invokePhase3Bot(state, bot, myCritiquesByBot.get(bot)!, onEvent)),
     );
+    this.checkCancelled();
 
     for (let i = 0; i < bots.length; i++) {
       const bot = bots[i];
@@ -543,6 +569,7 @@ export class ConsensusOrchestrator {
       const deltaResults = await Promise.allSettled(
         critics.map((c) => this.invokePhase4Critic(state, c, candidate, onEvent)),
       );
+    this.checkCancelled();
 
       state.deltas.clear();
       for (let i = 0; i < critics.length; i++) {
@@ -724,6 +751,7 @@ export class ConsensusOrchestrator {
     const results = await Promise.allSettled(
       surviving.map((b) => this.invokePhase5Bot(state, b, state.candidate!, onEvent)),
     );
+    this.checkCancelled();
 
     for (let i = 0; i < surviving.length; i++) {
       const bot = surviving[i];
@@ -790,6 +818,7 @@ export class ConsensusOrchestrator {
     prompt: string,
     onEvent?: ConsensusEventListener,
   ): Promise<string | null> {
+    this.checkCancelled();
     const bot = this.registry.get(botName);
     if (!bot) {
       this.logger.warn({ botName, taskId: state.taskId }, 'Bot not found in registry');
@@ -809,10 +838,13 @@ export class ConsensusOrchestrator {
         chatId,
         userId: 'consensus-orchestrator',
         sendCards: false,
+        signal: this.signal,
+        preferenceSourceChatId: this.chatId,
       }),
     );
 
     if (result.costUsd) state.costUsd += result.costUsd;
+    this.checkCancelled();
 
     if (!result.success) {
       this.logger.warn({ botName, error: result.error, taskId: state.taskId }, 'Bot execution failed');
@@ -920,6 +952,8 @@ export class ConsensusOrchestrator {
     payload: Record<string, unknown>,
     onEvent?: ConsensusEventListener,
   ): void {
+    if (type !== 'consensus_aborted') this.checkCancelled();
+    if (['consensus_reached', 'consensus_failed', 'consensus_aborted', 'user_escalated'].includes(type)) this.onSettled?.();
     const event: ConsensusEvent = { ts: Date.now(), type, payload };
     state.events.push(event);
     this.logger.info(
@@ -946,6 +980,16 @@ export class ConsensusOrchestrator {
     const phase = this.phaseFromPayload(payload) ?? state.phase;
     const bot = typeof payload.bot === 'string' ? payload.bot : null;
     const role = this.roleFromPayload(payload);
+
+    if (type === 'consensus_aborted') {
+      this.dashboardCardStatus = 'error';
+      this.dashboardNote = '已停止：后续阶段和重试已取消，已有结果保留。';
+      for (const [key, value] of this.dashboardStatusByKey) {
+        if (value === 'running' || value === 'pending') this.dashboardStatusByKey.set(key, 'skipped');
+      }
+      this.queueDashboardUpdate(state);
+      return;
+    }
 
     if (type === 'phase_entered') {
       this.dashboardCardStatus = 'running';
@@ -1352,6 +1396,7 @@ export class ConsensusOrchestrator {
    * API call without UI surfacing).
    */
   private postCard(title: string, body: string, color: 'blue' | 'green' | 'orange' | 'red' | 'turquoise' = 'blue'): void {
+    if (this.signal?.aborted) return;
     const displayTitle = this.currentTaskId ? `[${this.currentTaskId}] ${title}` : title;
     if (!this.chatId || !this.callerBotName) {
       this.logger.warn(

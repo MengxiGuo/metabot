@@ -3,17 +3,9 @@ import { mkdirSync } from 'node:fs';
 import type { BotConfigBase, GeminiBotConfig } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
-import type {
-  ApiContext,
-  ExecutionHandle,
-  ExecutorOptions,
-  SDKMessage,
-} from '../claude/executor.js';
-import {
-  createGeminiTranslatorState,
-  translateGeminiJsonEvent,
-  type GeminiJsonEvent,
-} from './jsonl-translator.js';
+import type { ApiContext, ExecutionHandle, ExecutorOptions, SDKMessage } from '../claude/executor.js';
+import { INDEPENDENT_JUDGMENT_POLICY, INDEPENDENT_JUDGMENT_POLICY_VERSION } from '../shared/independent-judgment.js';
+import { createGeminiTranslatorState, translateGeminiJsonEvent, type GeminiJsonEvent } from './jsonl-translator.js';
 import { fetchGeminiQuota } from './quota-fetcher.js';
 
 const isWindows = process.platform === 'win32';
@@ -77,10 +69,7 @@ const QUOTA_REGEX = /exhausted your capacity|RESOURCE_EXHAUSTED|quota.{0,30}(exc
 
 // 2.5 Pro shares the same AI Pro quota pool as 3.1 Pro, so it has no fallback
 // value — Flash is on a separate pool. Keep the chain minimal.
-const DEFAULT_FALLBACK_CHAIN = [
-  'gemini-3.1-pro-preview',
-  'gemini-3-flash-preview',
-];
+const DEFAULT_FALLBACK_CHAIN = ['gemini-3.1-pro-preview', 'gemini-3-flash-preview'];
 
 type AttemptOutcome =
   | { kind: 'completed'; messages: SDKMessage[] }
@@ -101,7 +90,11 @@ export class GeminiExecutor {
     const cwd = chatKey ? `/tmp/metabot-gemini/${chatKey}` : projectCwd;
     const includeDirs = cwd !== projectCwd ? [projectCwd] : undefined;
     if (cwd !== projectCwd) {
-      try { mkdirSync(cwd, { recursive: true }); } catch { /* ignore EEXIST */ }
+      try {
+        mkdirSync(cwd, { recursive: true });
+      } catch {
+        /* ignore EEXIST */
+      }
     }
 
     const fullPrompt = this.buildPromptWithContext(prompt, outputsDir, apiContext, includeDirs?.[0]);
@@ -117,9 +110,10 @@ export class GeminiExecutor {
     if (userSpecifiedModel) {
       chain = [userSpecifiedModel];
     } else {
-      const head = botDefault && !DEFAULT_FALLBACK_CHAIN.includes(botDefault)
-        ? [botDefault, ...DEFAULT_FALLBACK_CHAIN]
-        : DEFAULT_FALLBACK_CHAIN;
+      const head =
+        botDefault && !DEFAULT_FALLBACK_CHAIN.includes(botDefault)
+          ? [botDefault, ...DEFAULT_FALLBACK_CHAIN]
+          : DEFAULT_FALLBACK_CHAIN;
       chain = [...new Set(head)];
     }
 
@@ -128,14 +122,25 @@ export class GeminiExecutor {
     if (abortController.signal.aborted) {
       queue.finish();
     } else {
-      abortController.signal.addEventListener('abort', () => {
-        if (runState.currentChild && !runState.currentChild.killed) {
-          runState.currentChild.kill('SIGTERM');
-        }
-      }, { once: true });
+      abortController.signal.addEventListener(
+        'abort',
+        () => {
+          if (runState.currentChild && !runState.currentChild.killed) {
+            runState.currentChild.kill('SIGTERM');
+          }
+        },
+        { once: true },
+      );
       void this.runChain(chain, {
-        geminiConfig, fullPrompt, sessionId, cwd, includeDirs, abortController, queue,
-        startTime, runState,
+        geminiConfig,
+        fullPrompt,
+        sessionId,
+        cwd,
+        includeDirs,
+        abortController,
+        queue,
+        startTime,
+        runState,
       });
     }
 
@@ -201,9 +206,10 @@ export class GeminiExecutor {
       if (outcome.kind === 'error') {
         for (const m of outcome.messages) ctx.queue.enqueue(m);
       }
-      const message = outcome.kind === 'quota_exhausted'
-        ? `All Gemini models in fallback chain exhausted (last: ${model}). Quota detail: ${outcome.detail}`
-        : outcome.message;
+      const message =
+        outcome.kind === 'quota_exhausted'
+          ? `All Gemini models in fallback chain exhausted (last: ${model}). Quota detail: ${outcome.detail}`
+          : outcome.message;
       ctx.queue.enqueue({
         type: 'result',
         subtype: ctx.abortController.signal.aborted ? 'error_cancelled' : 'error_during_execution',
@@ -251,7 +257,16 @@ export class GeminiExecutor {
       let stdoutBuffer = '';
       const pending: SDKMessage[] = [];
 
-      this.logger.info({ cwd, hasSession: !!sessionId, engine: 'gemini', model }, 'Starting Gemini execution');
+      this.logger.info(
+        {
+          cwd,
+          hasSession: !!sessionId,
+          engine: 'gemini',
+          model,
+          judgmentPolicyVersion: INDEPENDENT_JUDGMENT_POLICY_VERSION,
+        },
+        'Starting Gemini execution',
+      );
 
       const emitEvent = (event: GeminiJsonEvent): void => {
         const messages = translateGeminiJsonEvent(event, state);
@@ -302,7 +317,9 @@ export class GeminiExecutor {
       ctx.runState.currentChild = child;
 
       child.stdout?.on('data', processStdout);
-      child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf-8'); });
+      child.stderr?.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf-8');
+      });
       child.on('error', (err) => {
         resolve({ kind: 'error', message: err.message, messages: pending });
       });
@@ -310,8 +327,11 @@ export class GeminiExecutor {
         if (stdoutBuffer.trim()) {
           const trimmed = stdoutBuffer.trim();
           if (trimmed.startsWith('{')) {
-            try { emitEvent(JSON.parse(trimmed) as GeminiJsonEvent); }
-            catch (err) { this.logger.warn({ err, line: trimmed }, 'Failed to parse final Gemini JSONL event'); }
+            try {
+              emitEvent(JSON.parse(trimmed) as GeminiJsonEvent);
+            } catch (err) {
+              this.logger.warn({ err, line: trimmed }, 'Failed to parse final Gemini JSONL event');
+            }
           }
         }
         if (stderr.trim()) {
@@ -448,7 +468,8 @@ export class GeminiExecutor {
       }
     }
 
-    if (sections.length === 0) return prompt;
+    sections.push(INDEPENDENT_JUDGMENT_POLICY);
+
     return `${prompt}\n\n---\n\n${sections.join('\n\n')}`;
   }
 }

@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StreamProcessor } from '../src/engines/claude/stream-processor.js';
 import {
+  applyCodexRateLimitsSnapshot,
   createCodexAppServerTranslatorState,
   enableCodexAppServerGoalOperation,
   translateCodexAppServerNotification,
@@ -8,6 +9,8 @@ import {
 import type { JsonRpcNotification } from '../src/engines/codex/app-server-client.js';
 
 describe('Codex app-server translator', () => {
+  afterEach(() => vi.restoreAllMocks());
+
   it('maps app-server text deltas and completion into the existing card state', () => {
     const state = createCodexAppServerTranslatorState({ model: 'gpt-5.5', contextWindow: 400000 });
     const processor = new StreamProcessor('hello');
@@ -31,8 +34,17 @@ describe('Codex app-server translator', () => {
         method: 'account/rateLimits/updated',
         params: {
           rateLimits: {
-            primary: { usedPercent: 19, resetsAt: Math.floor(Date.now() / 1000) + 3600 },
-            secondary: { usedPercent: 3, resetsAt: Math.floor(Date.now() / 1000) + 7200 },
+            limitId: 'codex',
+            primary: {
+              usedPercent: 19,
+              resetsAt: Math.floor(Date.now() / 1000) + 3600,
+              windowDurationMins: 300,
+            },
+            secondary: {
+              usedPercent: 3,
+              resetsAt: Math.floor(Date.now() / 1000) + 7200,
+              windowDurationMins: 10_080,
+            },
           },
         },
       },
@@ -56,8 +68,95 @@ describe('Codex app-server translator', () => {
     expect(cardState.quotaInfo).toMatchObject({
       usedPct: 19,
       hoursToReset: 1,
-      secondary: { usedPct: 3, hoursToReset: 2 },
+      label: '5h',
+      secondary: { usedPct: 3, hoursToReset: 2, label: '周' },
     });
+  });
+
+  it('selects Astra general quota and ignores later Spark-only rolling updates', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const state = createCodexAppServerTranslatorState({ model: 'gpt-6-astra' });
+    applyCodexRateLimitsSnapshot(
+      {
+        rateLimits: {
+          limitId: 'codex',
+          primary: { usedPercent: 29, resetsAt: 1000 + 7 * 86_400, windowDurationMins: 10_080 },
+          secondary: null,
+        },
+        rateLimitsByLimitId: {
+          codex_bengalfox: {
+            limitId: 'codex_bengalfox',
+            limitName: 'GPT-5.3-Codex-Spark',
+            primary: { usedPercent: 0, resetsAt: 1000 + 5 * 3_600, windowDurationMins: 300 },
+            secondary: { usedPercent: 0, resetsAt: 1000 + 7 * 86_400, windowDurationMins: 10_080 },
+          },
+          codex: {
+            limitId: 'codex',
+            primary: { usedPercent: 29, resetsAt: 1000 + 7 * 86_400, windowDurationMins: 10_080 },
+            secondary: null,
+          },
+        },
+      },
+      state,
+    );
+
+    expect(state.quotaInfo).toEqual({ usedPct: 29, hoursToReset: 168, label: '周' });
+
+    const sparkState = createCodexAppServerTranslatorState({ model: 'gpt-5.3-codex-spark' });
+    applyCodexRateLimitsSnapshot(
+      {
+        rateLimitsByLimitId: state.rateLimitsByLimitId,
+      },
+      sparkState,
+    );
+    expect(sparkState.quotaInfo).toEqual({
+      usedPct: 0,
+      hoursToReset: 5,
+      label: '5h',
+      secondary: { usedPct: 0, hoursToReset: 168, label: '周' },
+    });
+
+    translateCodexAppServerNotification(
+      {
+        method: 'account/rateLimits/updated',
+        params: {
+          rateLimits: {
+            limitId: 'codex_bengalfox',
+            primary: { usedPercent: 0 },
+            secondary: { usedPercent: 0 },
+          },
+        },
+      },
+      state,
+    );
+
+    expect(state.quotaInfo).toEqual({ usedPct: 29, hoursToReset: 168, label: '周' });
+  });
+
+  it('merges sparse updates into the selected bucket without losing its window label', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const state = createCodexAppServerTranslatorState({ model: 'gpt-6-astra' });
+    applyCodexRateLimitsSnapshot(
+      {
+        rateLimitsByLimitId: {
+          codex: {
+            limitId: 'codex',
+            primary: { usedPercent: 29, resetsAt: 1000 + 7 * 86_400, windowDurationMins: 10_080 },
+          },
+        },
+      },
+      state,
+    );
+
+    translateCodexAppServerNotification(
+      {
+        method: 'account/rateLimits/updated',
+        params: { rateLimits: { limitId: 'codex', primary: { usedPercent: 31 } } },
+      },
+      state,
+    );
+
+    expect(state.quotaInfo).toEqual({ usedPct: 31, hoursToReset: 168, label: '周' });
   });
 
   it('maps app-server command execution items to Bash tool cards', () => {

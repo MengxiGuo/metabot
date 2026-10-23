@@ -61,13 +61,17 @@ function pushGoalProgress(elements: unknown[], state: CardState): void {
     : state.status === 'thinking'
       ? 'starting turn'
       : state.status === 'running'
-        ? (state.responseText ? 'drafting response' : (goal.lastEvent ?? 'running'))
+        ? state.responseText
+          ? 'drafting response'
+          : (goal.lastEvent ?? 'running')
         : (goal.lastEvent ?? state.status);
 
   const usageParts: string[] = [];
   if (goal.tokensUsed !== undefined) {
     const prefix = goal.estimated ? '~' : '';
-    usageParts.push(`tokens ${prefix}${formatCount(goal.tokensUsed)}${goal.tokenBudget ? `/${formatCount(goal.tokenBudget)}` : ''}`);
+    usageParts.push(
+      `tokens ${prefix}${formatCount(goal.tokensUsed)}${goal.tokenBudget ? `/${formatCount(goal.tokenBudget)}` : ''}`,
+    );
   }
   if (goal.timeUsedSeconds !== undefined) {
     usageParts.push(`time ${goal.estimated ? '~' : ''}${formatDuration(goal.timeUsedSeconds)}`);
@@ -82,9 +86,7 @@ function pushGoalProgress(elements: unknown[], state: CardState): void {
     usageParts.length > 0 ? `Usage: ${usageParts.join(' · ')}` : undefined,
     `Now: ${truncate(current, 120)}`,
     goal.lastEvent ? `Last: ${truncate(goal.lastEvent, 120)}` : undefined,
-    completedTools.length > 0
-      ? `Recent: ${completedTools.map((t) => `${t.name} done`).join(' · ')}`
-      : undefined,
+    completedTools.length > 0 ? `Recent: ${completedTools.map((t) => `${t.name} done`).join(' · ')}` : undefined,
   ].filter(Boolean);
 
   elements.push({
@@ -119,11 +121,7 @@ function truncateContent(text: string): string {
       break;
     }
   }
-  return (
-    text.slice(0, headEnd) +
-    '\n\n... (内容过长，中间部分已省略) ...\n\n' +
-    text.slice(tailStart)
-  );
+  return text.slice(0, headEnd) + '\n\n... (内容过长，中间部分已省略) ...\n\n' + text.slice(tailStart);
 }
 
 // Marker the assistant writes to delimit its final conclusion from the preceding
@@ -142,9 +140,7 @@ const CONCLUSION_MARKER_RE = /\n*[ \t]*━{3,}[^\n]*结论[^\n]*━{3,}[ \t]*\n*
  *      everything before it is process (the model's natural explain→tool→sign-off).
  * Returns null when there is nothing meaningful to separate (single short answer).
  */
-export function splitProcessConclusion(
-  segments: string[],
-): { process: string; conclusion: string } | null {
+export function splitProcessConclusion(segments: string[]): { process: string; conclusion: string } | null {
   const clean = segments.map((s) => (s || '').trim()).filter(Boolean);
   if (clean.length === 0) return null;
   const full = clean.join('\n\n');
@@ -206,9 +202,7 @@ export function buildCard(state: CardState): string {
       content: truncateContent(state.responseText),
     });
   } else if (state.status === 'running') {
-    const elapsed = state.durationMs !== undefined
-      ? ` · 已运行 ${formatDuration(state.durationMs / 1000)}`
-      : '';
+    const elapsed = state.durationMs !== undefined ? ` · 已运行 ${formatDuration(state.durationMs / 1000)}` : '';
     elements.push({
       tag: 'markdown',
       content: `_任务仍在执行${elapsed}_`,
@@ -225,9 +219,7 @@ export function buildCard(state: CardState): string {
     elements.push({ tag: 'hr' });
     state.pendingQuestion.questions.forEach((q, qi) => {
       // Question prompt
-      const descLines = q.options.map(
-        (opt, i) => `**${i + 1}.** ${opt.label} — _${opt.description}_`,
-      );
+      const descLines = q.options.map((opt, i) => `**${i + 1}.** ${opt.label} — _${opt.description}_`);
       elements.push({
         tag: 'markdown',
         content: [`**[${q.header}] ${q.question}**`, '', ...descLines].join('\n'),
@@ -268,9 +260,7 @@ export function buildCard(state: CardState): string {
     const parts: string[] = [];
     if (state.totalTokens && state.contextWindow) {
       const pct = Math.round((state.totalTokens / state.contextWindow) * 100);
-      const tokensK = state.totalTokens >= 1000
-        ? `${(state.totalTokens / 1000).toFixed(1)}k`
-        : `${state.totalTokens}`;
+      const tokensK = state.totalTokens >= 1000 ? `${(state.totalTokens / 1000).toFixed(1)}k` : `${state.totalTokens}`;
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
       parts.push(`ctx: ${tokensK}/${ctxK} (${pct}%)`);
     }
@@ -281,25 +271,36 @@ export function buildCard(state: CardState): string {
       // the $-cost display.
       if (state.quotaInfo) {
         const { usedPct, hoursToReset, label, secondary, tertiary } = state.quotaInfo;
-        const resetStr = hoursToReset >= 1
-          ? `还有 ${hoursToReset.toFixed(1)}h reset`
-          : hoursToReset > 0
-            ? `还有 ${Math.round(hoursToReset * 60)}min reset`
-            : '即将 reset';
+        const shortReset = (h: number): string =>
+          h >= 24
+            ? `${(h / 24).toFixed(1)}d`
+            : h >= 1
+              ? `${h.toFixed(1)}h`
+              : h > 0
+                ? `${Math.round(h * 60)}min`
+                : '即将';
+        const resetStr =
+          hoursToReset >= 1
+            ? `还有 ${hoursToReset.toFixed(1)}h reset`
+            : hoursToReset > 0
+              ? `还有 ${Math.round(hoursToReset * 60)}min reset`
+              : '即将 reset';
         if (secondary || tertiary) {
           // Flat-tier engines may expose two or three windows (e.g. 5h/week/month).
-          const shortReset = (h: number): string =>
-            h >= 24 ? `${(h / 24).toFixed(1)}d` : h >= 1 ? `${h.toFixed(1)}h` : h > 0 ? `${Math.round(h * 60)}min` : '即将';
-          const windows = [
-            `${label ?? '5h'} ${usedPct.toFixed(1)}% (${shortReset(hoursToReset)})`,
-          ];
+          const windows = [`${label ?? '5h'} ${usedPct.toFixed(1)}% (${shortReset(hoursToReset)})`];
           if (secondary) {
-            windows.push(`${secondary.label ?? '周'} ${secondary.usedPct.toFixed(1)}% (${shortReset(secondary.hoursToReset)})`);
+            windows.push(
+              `${secondary.label ?? '周'} ${secondary.usedPct.toFixed(1)}% (${shortReset(secondary.hoursToReset)})`,
+            );
           }
           if (tertiary) {
-            windows.push(`${tertiary.label ?? '月'} ${tertiary.usedPct.toFixed(1)}% (${shortReset(tertiary.hoursToReset)})`);
+            windows.push(
+              `${tertiary.label ?? '月'} ${tertiary.usedPct.toFixed(1)}% (${shortReset(tertiary.hoursToReset)})`,
+            );
           }
           parts.push(`quota: ${windows.join(' · ')}`);
+        } else if (label) {
+          parts.push(`quota: ${label} ${usedPct.toFixed(1)}% (${shortReset(hoursToReset)})`);
         } else {
           parts.push(`quota: ${usedPct.toFixed(1)}% used (${resetStr})`);
         }
@@ -310,6 +311,9 @@ export function buildCard(state: CardState): string {
         // Strip the claude- prefix (claude-opus-4-7 → opus-4-7) but keep the
         // full Kimi model name since e.g. `for-coding` loses too much context.
         parts.push(state.model.replace(/^claude-/, ''));
+      }
+      if (state.reasoningEffort) {
+        parts.push(`effort: ${state.reasoningEffort}`);
       }
       if (state.durationMs !== undefined) {
         parts.push(`${(state.durationMs / 1000).toFixed(1)}s`);

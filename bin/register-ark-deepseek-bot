@@ -1,0 +1,183 @@
+#!/root/anaconda3/envs/quatumtradingnew/bin/python
+"""Register a Feishu MetaBot backed by Ark DeepSeek V4 Flash.
+
+Credentials are read from environment variables or a secret file so they do not
+need to be pasted into chat logs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import stat
+import sys
+import time
+from pathlib import Path
+
+
+DEFAULT_BOTS_CONFIG = Path("/root/metabot/bots.json")
+DEFAULT_WORKDIR = Path("/root/QuatumTrading_Claude_ark_deepseek")
+DEFAULT_NAME = "ark-claude-deepseek-v4-flash"
+DEFAULT_MODEL = "ark-code-latest"
+ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding"
+ARK_AUTH_TOKEN_FILE = Path("/root/.ark_coding_plan_key")
+ARK_ACCESS_KEY_ID_FILE = Path("/root/.ark_volc_access_key_id")
+ARK_SECRET_ACCESS_KEY_FILE = Path("/root/.ark_volc_secret_access_key")
+
+
+def mask(value: str) -> str:
+    if len(value) <= 10:
+        return value[:2] + "..."
+    return value[:6] + "..." + value[-4:]
+
+
+def read_secret(args: argparse.Namespace) -> tuple[str, str]:
+    app_id = args.app_id or os.environ.get("FEISHU_APP_ID", "")
+    app_secret = args.app_secret or os.environ.get("FEISHU_APP_SECRET", "")
+    secret_file = args.app_secret_file or os.environ.get("FEISHU_APP_SECRET_FILE", "")
+
+    if secret_file:
+        app_secret = Path(secret_file).read_text(encoding="utf-8").strip()
+
+    if not app_id:
+        raise SystemExit("missing Feishu App ID: pass --app-id or set FEISHU_APP_ID")
+    if not app_secret:
+        raise SystemExit("missing Feishu App Secret: pass --app-secret, FEISHU_APP_SECRET, or FEISHU_APP_SECRET_FILE")
+    if app_id in {"cli_xxx", "cli_replace_me"}:
+        raise SystemExit("FEISHU_APP_ID is still a placeholder")
+    if app_secret in {"CHANGE_ME", "replace_with_app_secret"}:
+        raise SystemExit("FEISHU_APP_SECRET is still a placeholder")
+    if not app_id.startswith("cli_"):
+        raise SystemExit(f"unexpected Feishu App ID format: {app_id!r}")
+    if len(app_secret) < 16:
+        raise SystemExit("Feishu App Secret looks too short")
+    return app_id, app_secret
+
+
+def require_readable(path: Path) -> None:
+    if not path.is_file():
+        raise SystemExit(f"required Ark credential file does not exist: {path}")
+    if not os.access(path, os.R_OK):
+        raise SystemExit(f"required Ark credential file is not readable: {path}")
+
+
+def load_config(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid JSON in {path}: {exc}") from exc
+
+
+def build_entry(args: argparse.Namespace, app_id: str, app_secret: str) -> dict:
+    model = args.model
+    return {
+        "name": args.name,
+        "description": "Ark Claude Code agent (Volcengine Coding Plan / ark-code-latest routed to DeepSeek V4 Flash) - second opinion / cross-check",
+        "feishuAppId": app_id,
+        "feishuAppSecret": app_secret,
+        "engine": "claude",
+        "defaultWorkingDirectory": str(args.workdir),
+        "model": model,
+        "claude": {
+            "authTokenFile": str(ARK_AUTH_TOKEN_FILE),
+            "env": {
+                "ANTHROPIC_BASE_URL": ARK_BASE_URL,
+                "ANTHROPIC_MODEL": model,
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+                "CLAUDE_CODE_SUBAGENT_MODEL": model,
+            },
+            "arkQuota": {
+                "accessKeyIdFile": str(ARK_ACCESS_KEY_ID_FILE),
+                "secretAccessKeyFile": str(ARK_SECRET_ACCESS_KEY_FILE),
+                "region": "cn-beijing",
+            },
+        },
+    }
+
+
+def scrub(entry: dict) -> dict:
+    clone = json.loads(json.dumps(entry))
+    clone["feishuAppId"] = mask(clone["feishuAppId"])
+    clone["feishuAppSecret"] = mask(clone["feishuAppSecret"])
+    return clone
+
+
+def ensure_workdir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    agents = path / "AGENTS.md"
+    if not agents.exists():
+        agents.write_text(
+            "# DeepSeek Ark MetaBot Workdir\n\n"
+            "This lightweight workdir is for the Ark DeepSeek V4 Flash MetaBot.\n"
+            "For project rules, read `/root/QuatumTrading_Claude/AGENTS.md` first.\n"
+            "For code and data work, use `/root/QuatumTrading_Claude` as the main project root.\n",
+            encoding="utf-8",
+        )
+
+
+def write_config(path: Path, config: dict) -> Path:
+    timestamp = time.strftime("%Y%m%d%H%M%S")
+    backup = path.with_name(f"{path.name}.bak.deepseek-{timestamp}")
+    shutil.copy2(path, backup)
+
+    tmp = path.with_name(f".{path.name}.deepseek.tmp")
+    tmp.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+    os.replace(tmp, path)
+    return backup
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--bots-config", type=Path, default=DEFAULT_BOTS_CONFIG)
+    parser.add_argument("--name", default=DEFAULT_NAME)
+    parser.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR)
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--app-id", default="")
+    parser.add_argument("--app-secret", default="")
+    parser.add_argument("--app-secret-file", default="")
+    parser.add_argument("--replace", action="store_true", help="replace an existing bot with the same name")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    for path in (ARK_AUTH_TOKEN_FILE, ARK_ACCESS_KEY_ID_FILE, ARK_SECRET_ACCESS_KEY_FILE):
+        require_readable(path)
+
+    app_id, app_secret = read_secret(args)
+    config = load_config(args.bots_config)
+    feishu_bots = config.setdefault("feishuBots", [])
+
+    existing_index = next((idx for idx, bot in enumerate(feishu_bots) if bot.get("name") == args.name), None)
+    if existing_index is not None and not args.replace:
+        raise SystemExit(f'bot "{args.name}" already exists; use --replace to update it')
+
+    entry = build_entry(args, app_id, app_secret)
+
+    print("registration_preview=" + json.dumps(scrub(entry), ensure_ascii=False, indent=2))
+    if args.dry_run:
+        print("dry_run=passed")
+        return 0
+
+    ensure_workdir(args.workdir)
+    if existing_index is None:
+        feishu_bots.append(entry)
+        action = "added"
+    else:
+        feishu_bots[existing_index] = entry
+        action = "replaced"
+
+    backup = write_config(args.bots_config, config)
+    print(f"bot_{action}={args.name}")
+    print(f"bots_config={args.bots_config}")
+    print(f"backup={backup}")
+    print(f"workdir={args.workdir}")
+    print("next_step=restart metabot after Feishu app console is configured")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

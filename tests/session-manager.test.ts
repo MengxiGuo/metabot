@@ -52,6 +52,72 @@ describe('SessionManager', () => {
     expect(session.sessionId).toBe('sess-abc');
   });
 
+  it('persists a long Codex context preference and resets conversation state when it changes', () => {
+    manager = new SessionManager('/tmp/test-dir', createLogger(), 'codex-test');
+    manager.setSessionId('chat1', 'sess-abc');
+    manager.addUsage('chat1', 123, 0.45, 6789);
+
+    expect(manager.setCodexContextMode('chat1', 'long')).toEqual({
+      changed: true,
+      sessionReset: true,
+    });
+    const session = manager.getSession('chat1');
+    expect(session.codexContextMode).toBe('long');
+    expect(session.sessionId).toBeUndefined();
+    expect(session.cumulativeTokens).toBe(0);
+
+    manager.destroy();
+    manager = new SessionManager('/tmp/test-dir', createLogger(), 'codex-test');
+    expect(manager.getSession('chat1').codexContextMode).toBe('long');
+  });
+
+  it('restores normal context mode without deleting the working directory', () => {
+    manager = new SessionManager('/tmp/test-dir', createLogger());
+    manager.setSessionWorkingDirectory('chat1', '/tmp/alternate');
+    manager.setCodexContextMode('chat1', 'long');
+
+    expect(manager.setCodexContextMode('chat1', 'normal')).toEqual({
+      changed: true,
+      sessionReset: false,
+    });
+    const session = manager.getSession('chat1');
+    expect(session.codexContextMode).toBeUndefined();
+    expect(session.workingDirectory).toBe('/tmp/alternate');
+  });
+
+  it('persists a Codex reasoning override and resets conversation state when it changes', () => {
+    manager = new SessionManager('/tmp/test-dir', createLogger(), 'codex-test');
+    manager.setSessionId('chat1', 'sess-abc');
+    manager.addUsage('chat1', 123, 0.45, 6789);
+
+    expect(manager.setCodexReasoningEffort('chat1', 'max')).toEqual({
+      changed: true,
+      sessionReset: true,
+    });
+    expect(manager.getSession('chat1')).toMatchObject({
+      codexReasoningEffort: 'max',
+      cumulativeTokens: 0,
+    });
+    expect(manager.getSession('chat1').sessionId).toBeUndefined();
+
+    manager.destroy();
+    manager = new SessionManager('/tmp/test-dir', createLogger(), 'codex-test');
+    expect(manager.getSession('chat1').codexReasoningEffort).toBe('max');
+  });
+
+  it('clears a Codex reasoning override without changing the working directory', () => {
+    manager = new SessionManager('/tmp/test-dir', createLogger());
+    manager.setSessionWorkingDirectory('chat1', '/tmp/alternate');
+    manager.setCodexReasoningEffort('chat1', 'xhigh');
+
+    expect(manager.setCodexReasoningEffort('chat1', undefined)).toEqual({
+      changed: true,
+      sessionReset: false,
+    });
+    expect(manager.getSession('chat1').codexReasoningEffort).toBeUndefined();
+    expect(manager.getSession('chat1').workingDirectory).toBe('/tmp/alternate');
+  });
+
   it('resets session (clears sessionId)', () => {
     manager = new SessionManager('/tmp/test-dir', createLogger());
     manager.getSession('chat1');

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { isStaleSessionError } from '../src/bridge/message-bridge.js';
+import {
+  getSessionRecoveryReason,
+  isCorruptedSessionError,
+  isStaleSessionError,
+} from '../src/bridge/message-bridge.js';
 
 describe('isStaleSessionError', () => {
   it('matches the GitHub issue error text', () => {
@@ -29,5 +33,40 @@ describe('isStaleSessionError', () => {
     expect(isStaleSessionError('Task timed out (24 hour limit)')).toBe(false);
     expect(isStaleSessionError('permission denied')).toBe(false);
     expect(isStaleSessionError(undefined)).toBe(false);
+  });
+});
+
+describe('isCorruptedSessionError', () => {
+  it('matches the persisted Codex tool-argument corruption seen in production', () => {
+    const error = [
+      'Error: {"type":"error","error":{"type":"invalid_request_error",',
+      '"message":"[ObjectParam] [input[555].arguments.]/botslikelizJenn… ',
+      '[property_name_above_max_length] Invalid property name in ',
+      '\'input[555].arguments\': expected maximum length 256, got 1768"}}',
+    ].join('');
+
+    expect(isCorruptedSessionError(error)).toBe(true);
+    expect(getSessionRecoveryReason(error)).toBe('corrupted-history');
+  });
+
+  it('matches invalid argument types in persisted input history', () => {
+    expect(
+      isCorruptedSessionError("Invalid type in 'input[42].arguments': expected an object"),
+    ).toBe(true);
+  });
+
+  it('does not reset sessions for unrelated invalid requests', () => {
+    expect(isCorruptedSessionError('invalid_request_error: unsupported model')).toBe(false);
+    expect(isCorruptedSessionError('permission denied')).toBe(false);
+    expect(isCorruptedSessionError(undefined)).toBe(false);
+  });
+});
+
+describe('getSessionRecoveryReason', () => {
+  it('classifies every error handled by the shared chat/API recovery path', () => {
+    expect(getSessionRecoveryReason('Conversation not found')).toBe('stale');
+    expect(getSessionRecoveryReason('maximum context length exceeded')).toBe('context-overflow');
+    expect(getSessionRecoveryReason('[property_name_above_max_length]')).toBe('corrupted-history');
+    expect(getSessionRecoveryReason('HTTP 503 service unavailable')).toBeUndefined();
   });
 });

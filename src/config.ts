@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 /** Agent engine backing a bot. */
-export type EngineName = 'claude' | 'kimi' | 'codex' | 'gemini';
+export type EngineName = 'claude' | 'kimi' | 'codex' | 'gemini' | 'antigravity';
 
 /** Shared config fields used by MessageBridge and Executors (platform-agnostic). */
 export interface BotConfigBase {
@@ -48,6 +48,8 @@ export interface BotConfigBase {
   codex?: CodexBotConfig;
   /** Gemini-specific overrides. Populated only when engine === 'gemini'. */
   gemini?: GeminiBotConfig;
+  /** Antigravity-specific overrides. Populated only when engine === 'antigravity'. */
+  antigravity?: AntigravityBotConfig;
   /**
    * Optional map: Feishu chatId → list of peer bot names that also live in
    * that chat. When set, MessageBridge.handleMessage fills apiContext with
@@ -73,6 +75,62 @@ export interface GeminiBotConfig {
   env?: Record<string, string>;
 }
 
+/** One pre-authenticated Antigravity account runner. Credentials stay outside MetaBot. */
+export interface AntigravityAccountConfig {
+  /**
+   * Absolute path to an executable wrapper for this account. The wrapper must
+   * launch `agy` with that account's explicitly isolated profile directory and
+   * forward argv. The profile mechanism is deployment-specific and must be
+   * revalidated after every CLI upgrade.
+   */
+  runner: string;
+}
+
+export const ANTIGRAVITY_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type AntigravityReasoningEffort = (typeof ANTIGRAVITY_REASONING_EFFORTS)[number];
+export function isAntigravityReasoningEffort(value: unknown): value is AntigravityReasoningEffort {
+  return typeof value === 'string' && ANTIGRAVITY_REASONING_EFFORTS.includes(value as AntigravityReasoningEffort);
+}
+
+/** Antigravity CLI overrides. Account credentials remain in the CLI's secure keyring. */
+export interface AntigravityBotConfig {
+  executable?: string;
+  model?: string;
+  displayModel?: string;
+  effort?: AntigravityReasoningEffort;
+  /** Enable the CLI terminal sandbox. Defaults to true in the executor. */
+  sandbox?: boolean;
+  /**
+   * Auto-approve every Antigravity tool permission request. This gives the
+   * root-running CLI unrestricted host access and supersedes `sandbox`.
+   */
+  dangerouslySkipPermissions?: boolean;
+  /** Antigravity print timeout, for example "15m". */
+  printTimeout?: string;
+  /** Optional custom Antigravity agent name. */
+  agent?: string;
+  /** Context window size in tokens for display only. */
+  contextWindow?: number;
+  extraArgs?: string[];
+  env?: Record<string, string>;
+  /** Named isolated account runners, selectable manually or by opt-in quota failover. */
+  accounts?: Record<string, AntigravityAccountConfig>;
+  /** Retry explicit quota exhaustion only before any work; shared across chats. */
+  quotaFailover?: boolean;
+  /** Required when accounts are configured. */
+  defaultAccount?: string;
+}
+
+export type CodexContextMode = 'normal' | 'long';
+
+export const CODEX_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+
+export type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORTS)[number];
+
+export function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort {
+  return typeof value === 'string' && (CODEX_REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
 /** Codex-specific overrides. Populated only when engine === 'codex'. */
 export interface CodexBotConfig {
   executable?: string;
@@ -80,6 +138,10 @@ export interface CodexBotConfig {
   transport?: 'exec' | 'app-server';
   model?: string;
   displayModel?: string;
+  /** Fallback reasoning effort when the selected model has no model-specific entry. */
+  reasoningEffort?: CodexReasoningEffort;
+  /** Per-model reasoning defaults. Exact model names take precedence over reasoningEffort. */
+  reasoningEffortByModel?: Record<string, CodexReasoningEffort>;
   profile?: string;
   approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
   sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -229,6 +291,9 @@ export interface GeminiJsonConfig {
   env?: Record<string, string>;
 }
 
+/** Antigravity-specific overrides in bots.json. */
+export type AntigravityJsonConfig = AntigravityBotConfig;
+
 /** Codex-specific overrides in bots.json. */
 export interface CodexJsonConfig {
   executable?: string;
@@ -236,6 +301,8 @@ export interface CodexJsonConfig {
   transport?: 'exec' | 'app-server';
   model?: string;
   displayModel?: string;
+  reasoningEffort?: CodexReasoningEffort;
+  reasoningEffortByModel?: Record<string, CodexReasoningEffort>;
   profile?: string;
   approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
   sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -254,6 +321,7 @@ interface EngineJsonFields {
   kimi?: KimiJsonConfig;
   codex?: CodexJsonConfig;
   gemini?: GeminiJsonConfig;
+  antigravity?: AntigravityJsonConfig;
 }
 
 export interface FeishuBotJsonEntry extends EngineJsonFields {
@@ -293,6 +361,7 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
 function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
   const codex = buildCodexConfig(entry.codex);
   const gemini = buildGeminiConfig(entry.gemini);
+  const antigravity = buildAntigravityConfig(entry.antigravity);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
@@ -306,6 +375,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     ...(entry.feishuGroups ? { feishuGroups: entry.feishuGroups } : {}),
     feishu: {
       appId: entry.feishuAppId,
@@ -338,6 +408,7 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
 function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
   const codex = buildCodexConfig(entry.codex);
   const gemini = buildGeminiConfig(entry.gemini);
+  const antigravity = buildAntigravityConfig(entry.antigravity);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
@@ -350,6 +421,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     telegram: {
       botToken: entry.telegramBotToken,
     },
@@ -378,6 +450,7 @@ export interface WebBotJsonEntry extends EngineJsonFields {
 export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
   const codex = buildCodexConfig(entry.codex);
   const gemini = buildGeminiConfig(entry.gemini);
+  const antigravity = buildAntigravityConfig(entry.antigravity);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
@@ -390,6 +463,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     claude: buildClaudeConfig(entry),
   };
 }
@@ -413,6 +487,7 @@ export interface WechatBotJsonEntry extends EngineJsonFields {
 function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
   const codex = buildCodexConfig(entry.codex);
   const gemini = buildGeminiConfig(entry.gemini);
+  const antigravity = buildAntigravityConfig(entry.antigravity);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
@@ -420,6 +495,7 @@ function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     wechat: {
       ilinkBaseUrl: entry.ilinkBaseUrl,
       botToken: entry.wechatBotToken,
@@ -475,8 +551,7 @@ function buildClaudeConfig(entry: {
 }
 
 function buildCodexConfig(entry?: CodexJsonConfig): BotConfigBase['codex'] | undefined {
-  const envAutoApproveOrigins = process.env.CODEX_AUTO_APPROVE_BROWSER_ORIGINS
-    ?.split(',')
+  const envAutoApproveOrigins = process.env.CODEX_AUTO_APPROVE_BROWSER_ORIGINS?.split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
   const cfg: BotConfigBase['codex'] = {
@@ -484,6 +559,9 @@ function buildCodexConfig(entry?: CodexJsonConfig): BotConfigBase['codex'] | und
     ...(process.env.CODEX_TRANSPORT ? { transport: process.env.CODEX_TRANSPORT as CodexJsonConfig['transport'] } : {}),
     ...(process.env.CODEX_MODEL ? { model: process.env.CODEX_MODEL } : {}),
     ...(process.env.CODEX_DISPLAY_MODEL ? { displayModel: process.env.CODEX_DISPLAY_MODEL } : {}),
+    ...(isCodexReasoningEffort(process.env.CODEX_REASONING_EFFORT)
+      ? { reasoningEffort: process.env.CODEX_REASONING_EFFORT }
+      : {}),
     ...(process.env.CODEX_PROFILE ? { profile: process.env.CODEX_PROFILE } : {}),
     ...(process.env.CODEX_APPROVAL_POLICY
       ? { approvalPolicy: process.env.CODEX_APPROVAL_POLICY as CodexJsonConfig['approvalPolicy'] }
@@ -513,16 +591,61 @@ function buildGeminiConfig(entry?: GeminiJsonConfig): BotConfigBase['gemini'] | 
   return Object.keys(cfg).length > 0 ? cfg : undefined;
 }
 
+function buildAntigravityConfig(entry?: AntigravityJsonConfig): BotConfigBase['antigravity'] | undefined {
+  const cfg: BotConfigBase['antigravity'] = {
+    ...(process.env.ANTIGRAVITY_EXECUTABLE_PATH ? { executable: process.env.ANTIGRAVITY_EXECUTABLE_PATH } : {}),
+    ...(process.env.ANTIGRAVITY_MODEL ? { model: process.env.ANTIGRAVITY_MODEL } : {}),
+    ...(process.env.ANTIGRAVITY_DISPLAY_MODEL ? { displayModel: process.env.ANTIGRAVITY_DISPLAY_MODEL } : {}),
+    ...(process.env.ANTIGRAVITY_EFFORT
+      ? { effort: process.env.ANTIGRAVITY_EFFORT as AntigravityJsonConfig['effort'] }
+      : {}),
+    ...(process.env.ANTIGRAVITY_SANDBOX ? { sandbox: process.env.ANTIGRAVITY_SANDBOX !== 'false' } : {}),
+    ...(process.env.ANTIGRAVITY_DANGEROUSLY_SKIP_PERMISSIONS
+      ? {
+          dangerouslySkipPermissions: process.env.ANTIGRAVITY_DANGEROUSLY_SKIP_PERMISSIONS === 'true',
+        }
+      : {}),
+    ...(process.env.ANTIGRAVITY_PRINT_TIMEOUT ? { printTimeout: process.env.ANTIGRAVITY_PRINT_TIMEOUT } : {}),
+    ...(process.env.ANTIGRAVITY_AGENT ? { agent: process.env.ANTIGRAVITY_AGENT } : {}),
+    ...(process.env.ANTIGRAVITY_CONTEXT_WINDOW
+      ? { contextWindow: parseInt(process.env.ANTIGRAVITY_CONTEXT_WINDOW, 10) }
+      : {}),
+    ...(entry ?? {}),
+  };
+  if (cfg.accounts && Object.keys(cfg.accounts).length > 0) {
+    const aliases = Object.keys(cfg.accounts);
+    for (const alias of aliases) {
+      if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(alias)) {
+        throw new Error(
+          `Invalid Antigravity account alias "${alias}". Use lowercase letters, digits, underscore, or hyphen.`,
+        );
+      }
+      const runner = cfg.accounts[alias]?.runner;
+      if (!runner || !path.isAbsolute(runner)) {
+        throw new Error(`Antigravity account "${alias}" must define an absolute runner path.`);
+      }
+    }
+    if (!cfg.defaultAccount || !cfg.accounts[cfg.defaultAccount]) {
+      throw new Error('Antigravity defaultAccount must name one of the configured accounts.');
+    }
+  } else if (cfg.defaultAccount) {
+    throw new Error('Antigravity defaultAccount requires a non-empty accounts map.');
+  }
+  return Object.keys(cfg).length > 0 ? cfg : undefined;
+}
+
 // --- Single-bot env var mode ---
 
 function feishuBotFromEnv(): BotConfig {
   const codex = buildCodexConfig();
   const gemini = buildGeminiConfig();
+  const antigravity = buildAntigravityConfig();
   return {
     name: 'default',
     ...(process.env.METABOT_ENGINE ? { engine: process.env.METABOT_ENGINE as EngineName } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     feishu: {
       appId: required('FEISHU_APP_ID'),
       appSecret: required('FEISHU_APP_SECRET'),
@@ -543,11 +666,13 @@ function feishuBotFromEnv(): BotConfig {
 function telegramBotFromEnv(): TelegramBotConfig {
   const codex = buildCodexConfig();
   const gemini = buildGeminiConfig();
+  const antigravity = buildAntigravityConfig();
   return {
     name: 'telegram-default',
     ...(process.env.METABOT_ENGINE ? { engine: process.env.METABOT_ENGINE as EngineName } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     telegram: {
       botToken: required('TELEGRAM_BOT_TOKEN'),
     },
@@ -567,11 +692,13 @@ function telegramBotFromEnv(): TelegramBotConfig {
 function wechatBotFromEnv(): WechatBotConfig {
   const codex = buildCodexConfig();
   const gemini = buildGeminiConfig();
+  const antigravity = buildAntigravityConfig();
   return {
     name: 'wechat-default',
     ...(process.env.METABOT_ENGINE ? { engine: process.env.METABOT_ENGINE as EngineName } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     wechat: {
       botToken: process.env.WECHAT_BOT_TOKEN || undefined,
     },

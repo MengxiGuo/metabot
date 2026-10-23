@@ -1,5 +1,7 @@
 // Shared types used across IM platforms (Feishu, Telegram, etc.)
 
+import type { CodexReasoningEffort } from './config.js';
+
 export type CardStatus = 'thinking' | 'running' | 'complete' | 'error' | 'waiting_for_input';
 
 export interface ToolCall {
@@ -55,6 +57,8 @@ export interface CardState {
   pendingQuestion?: PendingQuestion;
   /** Primary model used (e.g. "claude-opus-4-7") */
   model?: string;
+  /** Actual Codex reasoning effort observed for this turn. */
+  reasoningEffort?: CodexReasoningEffort;
   /** Total input+output tokens consumed */
   totalTokens?: number;
   /** Context window size of the primary model */

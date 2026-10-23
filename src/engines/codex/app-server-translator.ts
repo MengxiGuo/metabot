@@ -1,6 +1,7 @@
 import type { SDKMessage } from '../claude/executor.js';
 import type { JsonRpcNotification } from './app-server-client.js';
 import type { CodexGoal } from './goal.js';
+import { codexRateLimitIdForModel, quotaWindowLabel } from './rate-limits.js';
 
 export interface CodexAppServerTranslatorState {
   threadId?: string;
@@ -15,6 +16,8 @@ export interface CodexAppServerTranslatorState {
     contextWindow?: number;
   };
   quotaInfo?: SDKMessage['quotaInfo'];
+  rateLimitsByLimitId: Record<string, Record<string, unknown>>;
+  lastRateLimitId?: string;
   goal?: CodexGoal | null;
   currentTurnTokens?: number;
   streamedAgentItems: Set<string>;
@@ -33,6 +36,7 @@ export function createCodexAppServerTranslatorState(options: {
     startTime: Date.now(),
     model: options.model,
     contextWindow: options.contextWindow,
+    rateLimitsByLimitId: {},
     streamedAgentItems: new Set<string>(),
   };
 }
@@ -346,13 +350,75 @@ function captureQuota(
 ): void {
   const rateLimits = params.rateLimits;
   if (!isRecord(rateLimits)) return;
-  const primary = makeWindow(rateLimits.primary);
+  const knownLimitIds = Object.keys(state.rateLimitsByLimitId);
+  const limitId = readString(rateLimits, 'limitId')
+    ?? state.lastRateLimitId
+    ?? (knownLimitIds.length === 1 ? knownLimitIds[0] : undefined)
+    ?? (knownLimitIds.length === 0 ? codexRateLimitIdForModel(state.model) : undefined);
+  if (!limitId) return;
+  state.lastRateLimitId = limitId;
+  state.rateLimitsByLimitId[limitId] = mergeSparseRateLimit(
+    state.rateLimitsByLimitId[limitId],
+    rateLimits,
+  );
+  refreshSelectedQuota(state);
+}
+
+/** Seed the translator from the authoritative account/rateLimits/read snapshot. */
+export function applyCodexRateLimitsSnapshot(
+  snapshot: unknown,
+  state: CodexAppServerTranslatorState,
+): void {
+  if (!isRecord(snapshot)) return;
+  const next: Record<string, Record<string, unknown>> = {};
+  state.lastRateLimitId = undefined;
+  const byLimitId = snapshot.rateLimitsByLimitId;
+  if (isRecord(byLimitId)) {
+    for (const [key, raw] of Object.entries(byLimitId)) {
+      if (!isRecord(raw)) continue;
+      next[readString(raw, 'limitId') ?? key] = { ...raw };
+    }
+  }
+
+  const backwardCompatible = snapshot.rateLimits;
+  if (isRecord(backwardCompatible)) {
+    const limitId = readString(backwardCompatible, 'limitId') ?? codexRateLimitIdForModel(state.model);
+    next[limitId] = { ...backwardCompatible };
+    state.lastRateLimitId = limitId;
+  }
+
+  state.rateLimitsByLimitId = next;
+  refreshSelectedQuota(state);
+}
+
+function refreshSelectedQuota(state: CodexAppServerTranslatorState): void {
+  const selected = state.rateLimitsByLimitId[codexRateLimitIdForModel(state.model)];
+  if (!selected) {
+    state.quotaInfo = undefined;
+    return;
+  }
+  const primary = makeWindow(selected.primary);
   if (!primary) return;
-  const secondary = makeWindow(rateLimits.secondary);
+  const secondary = makeWindow(selected.secondary);
   state.quotaInfo = {
     ...primary,
     ...(secondary ? { secondary } : {}),
   };
+}
+
+function mergeSparseRateLimit(
+  current: Record<string, unknown> | undefined,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...(current ?? {}) };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined || value === null) continue;
+    const previous = merged[key];
+    merged[key] = isRecord(previous) && isRecord(value)
+      ? mergeSparseRateLimit(previous, value)
+      : value;
+  }
+  return merged;
 }
 
 function readGoal(value: unknown): CodexGoal | undefined {
@@ -375,15 +441,19 @@ function readGoal(value: unknown): CodexGoal | undefined {
   };
 }
 
-function makeWindow(raw: unknown): { usedPct: number; hoursToReset: number } | undefined {
+function makeWindow(
+  raw: unknown,
+): { usedPct: number; hoursToReset: number; label?: string } | undefined {
   if (!isRecord(raw)) return undefined;
   const used = readNumber(raw, 'usedPercent');
   if (used === undefined) return undefined;
   const resetsAt = readNumber(raw, 'resetsAt');
   const hoursToReset = resetsAt ? Math.max(0, (resetsAt - Date.now() / 1000) / 3600) : 0;
+  const label = quotaWindowLabel(readNumber(raw, 'windowDurationMins'));
   return {
     usedPct: Math.round(used * 10) / 10,
     hoursToReset: Math.round(hoursToReset * 10) / 10,
+    ...(label ? { label } : {}),
   };
 }
 

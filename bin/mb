@@ -33,7 +33,7 @@ except Exception:
 
 print(json.dumps(obj, ensure_ascii=False, indent=2))
 
-failed = obj.get("success") is False or obj.get("status") == "failed"
+failed = obj.get("success") is False or obj.get("status") in ("failed", "cancelled")
 result = obj.get("result")
 if isinstance(result, dict):
     failed = failed or result.get("success") is False
@@ -307,6 +307,14 @@ print(json.dumps(out))
           -H "$METABOT_AUTH" -H "Content-Type: application/json" \
           -d @- | _json
         ;;
+      stop|cancel)
+        tid="${1:-}"
+        if [[ ! "$tid" =~ ^[a-zA-Z0-9-]+$ ]]; then
+          echo "Usage: mb consensus stop <taskId>" >&2
+          exit 1
+        fi
+        _api_json -X POST -H "$METABOT_AUTH" "$METABOT_URL/api/consensus/$tid/stop"
+        ;;
       get|status|s)
         tid="${1:-}"
         if [[ -z "$tid" ]]; then
@@ -322,6 +330,7 @@ print(json.dumps(out))
         echo "  mb consensus doctor [profile|bot1,bot2,...] [chatId] [callerBot]"
         echo "  mb consensus dry-run [profile|bot1,bot2,...] [chatId] [callerBot]"
         echo "  mb consensus get <taskId>"
+        echo "  mb consensus stop <taskId>"
         exit 1
         ;;
     esac
