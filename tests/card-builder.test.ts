@@ -34,6 +34,20 @@ describe('buildCard', () => {
     expect(md.content).toContain('⏳');
   });
 
+  it('shows elapsed time for a running task with no visible output yet', () => {
+    const state: CardState = {
+      status: 'running',
+      userPrompt: 'long goal',
+      responseText: '',
+      toolCalls: [],
+      durationMs: 125_000,
+    };
+    const json = JSON.parse(buildCard(state));
+    const progress = json.elements.find((e: any) => e.tag === 'markdown' && e.content.includes('任务仍在执行'));
+    expect(progress).toBeDefined();
+    expect(progress.content).toContain('已运行 2min');
+  });
+
   it('builds complete card with stats', () => {
     const state: CardState = {
       status: 'complete',
@@ -48,6 +62,43 @@ describe('buildCard', () => {
     const note = json.elements.find((e: any) => e.tag === 'note');
     expect(note).toBeDefined();
     expect(note.elements[0].content).toContain('5.0s');
+  });
+
+  it('shows the actual Codex reasoning effort in the result footer', () => {
+    const state: CardState = {
+      status: 'complete',
+      userPrompt: 'task',
+      responseText: 'All done!',
+      toolCalls: [],
+      durationMs: 5000,
+      model: 'gpt-6-astra',
+      reasoningEffort: 'xhigh',
+    };
+    const json = JSON.parse(buildCard(state));
+    const note = json.elements.find((e: any) => e.tag === 'note');
+
+    expect(note?.elements[0].content).toBe('gpt-6-astra | effort: xhigh | 5.0s');
+  });
+
+  it('renders the exact Astra footer with the selected weekly quota bucket', () => {
+    const state: CardState = {
+      status: 'complete',
+      userPrompt: 'check quota',
+      responseText: 'Checked.',
+      toolCalls: [],
+      totalTokens: 507_000,
+      contextWindow: 828_000,
+      quotaInfo: { usedPct: 29, hoursToReset: 7 * 24, label: '周' },
+      model: 'gpt-6-astra',
+      reasoningEffort: 'high',
+      durationMs: 184_500,
+    };
+    const json = JSON.parse(buildCard(state));
+    const note = json.elements.find((e: any) => e.tag === 'note');
+
+    expect(note?.elements[0].content).toBe(
+      'ctx: 507.0k/828k (61%) | quota: 周 29.0% (7.0d) | gpt-6-astra | effort: high | 184.5s',
+    );
   });
 
   it('builds error card with error message', () => {
@@ -72,15 +123,17 @@ describe('buildCard', () => {
       toolCalls: [],
       pendingQuestion: {
         toolUseId: 'q1',
-        questions: [{
-          question: 'Which env?',
-          header: 'Deploy',
-          options: [
-            { label: 'Production', description: 'Live environment' },
-            { label: 'Staging', description: 'Test environment' },
-          ],
-          multiSelect: false,
-        }],
+        questions: [
+          {
+            question: 'Which env?',
+            header: 'Deploy',
+            options: [
+              { label: 'Production', description: 'Live environment' },
+              { label: 'Staging', description: 'Test environment' },
+            ],
+            multiSelect: false,
+          },
+        ],
       },
     };
     const json = JSON.parse(buildCard(state));
@@ -114,7 +167,7 @@ describe('buildCard', () => {
       toolCalls: [],
     };
     const json = JSON.parse(buildCard(state));
-    const md = json.elements.find((e: any) => e.tag === 'markdown' && e.content.includes('truncated'));
+    const md = json.elements.find((e: any) => e.tag === 'markdown' && /内容过长|truncated/.test(e.content));
     expect(md).toBeDefined();
   });
 
@@ -125,7 +178,12 @@ describe('buildCard', () => {
       responseText: 'watching…',
       toolCalls: [],
       backgroundEvents: [
-        { taskId: 'bheol4172', description: 'Watching CI for PR #215', status: 'running', lastEvent: 'check (20) running' },
+        {
+          taskId: 'bheol4172',
+          description: 'Watching CI for PR #215',
+          status: 'running',
+          lastEvent: 'check (20) running',
+        },
         { taskId: 'bmkr16j6f', description: 'Watching deploy', status: 'completed', lastEvent: 'CI done: success' },
       ],
     };
@@ -150,6 +208,37 @@ describe('buildCard', () => {
     const json = JSON.parse(buildCard(state));
     const bg = json.elements.find((e: any) => e.tag === 'markdown' && /Background/.test(e.content));
     expect(bg).toBeUndefined();
+  });
+
+  it('renders official goal progress with usage and current action', () => {
+    const state: CardState = {
+      status: 'running',
+      userPrompt: 'continue',
+      responseText: 'Working through it...',
+      toolCalls: [
+        { name: 'Read', detail: '`src/a.ts`', status: 'done' },
+        { name: 'Bash', detail: '`npm test`', status: 'running' },
+      ],
+      goalProgress: {
+        threadId: '019f26dd-b73d-7761-91cb-07638c430efe',
+        objective: 'Ship official Codex goal progress cards',
+        status: 'active',
+        tokenBudget: 20000,
+        tokensUsed: 1234,
+        timeUsedSeconds: 95,
+        estimated: true,
+        lastEvent: 'usage updated',
+      },
+    };
+    const json = JSON.parse(buildCard(state));
+    const goal = json.elements.find((e: any) => e.tag === 'markdown' && /Goal/.test(e.content));
+    expect(goal).toBeDefined();
+    expect(goal.content).toContain('Ship official Codex goal progress cards');
+    expect(goal.content).toContain('tokens ~1.2k/20.0k');
+    expect(goal.content).toContain('time ~2min');
+    expect(goal.content).toContain('Bash');
+    expect(goal.content).toContain('usage updated');
+    expect(goal.content).toContain('Read done');
   });
 });
 

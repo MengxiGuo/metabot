@@ -2,6 +2,23 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## P0 Operational Rule: MetaBot Availability
+
+MetaBot is the user's primary Feishu/Lark communication channel with the agent. Stopping, restarting, killing, crashing, or misconfiguring it can fully disconnect the user when they cannot access the server terminal.
+
+Before any action that can affect MetaBot connectivity, including `metabot stop/restart/start/update`, PM2 stop/restart/delete/kill for `metabot`, process kills, edits to `bots.json`, `.metabot/scheduled-tasks.json`, `ecosystem.config.cjs`, Feishu app credentials, bot names, schedule bot names, or runtime env that may require a restart:
+
+1. Notify the user first in the current chat.
+2. State whether the intended change has succeeded or failed so far. If it failed, investigate first; do not force a restart as a blind fix.
+3. Explain why a stop/restart is needed and what happens if it is not done.
+4. Explicitly disclose the risk that Feishu communication may be interrupted and the user may lose contact with the agent.
+5. State the recovery and verification plan, such as PM2 status, recent logs, Feishu event receipt, and schedule/bot-name checks.
+6. Wait for explicit user approval unless the user's current message directly asks for that exact restart/stop action.
+
+When the user directly asks to restart MetaBot, announce the restart, perform it, then verify and report PM2 status plus key logs. Never silently stop, restart, or kill MetaBot.
+
+This rule records the 2026-07-02 P0 incident where MetaBot availability was interrupted during bot/schedule-name work.
+
 ## Project Overview
 
 MetaBot — A bridge service that connects IM bots (Feishu/Lark) to the Claude Code Agent SDK. Users chat with Claude Code from Feishu (including mobile), with real-time streaming updates via interactive cards. Runs Claude in `bypassPermissions` mode since there's no terminal for interactive approval.
@@ -47,6 +64,10 @@ Web Browser → WebSocket (/ws) → ws-server.ts → MessageBridge.executeApiTas
 - **`src/feishu/message-sender.ts`** — Feishu API wrapper for sending/updating cards, uploading/downloading images, sending text.
 - **`src/bridge/rate-limiter.ts`** — Throttles card updates to avoid Feishu API rate limits (default 1.5s interval). Keeps only the latest pending update.
 - **`src/api/peer-manager.ts`** — Manages cross-instance bot discovery and task forwarding. Polls peer MetaBot instances every 30s, caches their bot lists, supports qualified name routing (`peerName/botName`). Anti-loop via `X-MetaBot-Origin` header.
+- **`src/utils/upstream-api-error.ts`** — Detects provider errors that SDKs
+  accidentally wrap as successful assistant text (including Kimi's optional
+  no-data persistence preamble), normalizes `/api/talk` results into structured
+  failures, and preserves upstream status/request IDs.
 - **`src/web/ws-server.ts`** — WebSocket server for the Web UI. Handles upgrade on `/ws`, token auth via `?token=`, heartbeat, and routes `chat`/`stop`/`answer` messages. Also serves static files from `dist/web/` for the SPA.
 
 ### Outputs Directory Pattern
@@ -399,3 +420,11 @@ When implementing a feature or fixing a bug, follow this end-to-end workflow unl
 6. **Merge** — Once CI is green, merge via `gh pr merge --squash --delete-branch`.
 7. **Sync dev** — After merge, sync dev: `git checkout dev && git merge main && git push`.
 
+### Antigravity effort command
+
+`/effort` routes by the active engine. Antigravity overrides are stored as `antigravityReasoningEffort` in `SessionManager` and forwarded in `ExecutorOptions` through all chat/API/recovery paths. The executor validates the CLI value and passes one `--effort`; it never mutates bot configuration. Command mutation verifies model-family variants from the currently selected account's catalog, rechecks state after async lookup, refuses busy tasks and persistence errors, and detaches the old conversation on changes. `/reset` preserves the preference; `/model reset` clears it. `/status` reports the requested setting, not measured reasoning.
+
+
+### Consensus cancellation and preference isolation
+
+`orchestrator/consensus-control.ts` owns live run AbortControllers by exact task ID and origin chat plus eligible bots. Routes register before launching; `/stop` / exact `stop` and the specific stop API use the same controller. The bridge forwards abort to its current execution handle; session recovery and later orchestrator phases are gated. The terminal outcome is frozen before final card delivery; cancellation is `cancelled` / `aborted`, not success. Source chat preferences are seeded atomically once into a new isolated session, never its native session ID or usage. Production initializes persistent quota health at startup; offline fixtures use in-memory health unless explicitly given a temporary path. Do not weaken replay guards or confuse stop requests with rollback of tool side effects.

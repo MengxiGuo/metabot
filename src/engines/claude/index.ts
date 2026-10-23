@@ -21,7 +21,7 @@ export class ClaudeEngine implements Engine {
   }
 }
 
-export { ClaudeExecutor } from './executor.js';
+export { ClaudeExecutor, compactSession } from './executor.js';
 export { StreamProcessor, extractImagePaths } from './stream-processor.js';
 export { SessionManager } from './session-manager.js';
 export type { UserSession } from './session-manager.js';
@@ -30,5 +30,6 @@ export type {
   ExecutionHandle,
   ExecutorOptions,
   ApiContext,
+  CompactResult,
 } from './executor.js';
 export type { DetectedTool } from './stream-processor.js';

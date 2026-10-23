@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 /** Agent engine backing a bot. */
-export type EngineName = 'claude' | 'kimi' | 'codex' | 'gemini';
+export type EngineName = 'claude' | 'kimi' | 'codex' | 'gemini' | 'antigravity';
 
 /** Shared config fields used by MessageBridge and Executors (platform-agnostic). */
 export interface BotConfigBase {
@@ -26,6 +26,12 @@ export interface BotConfigBase {
      *  key instead of ~/.claude/.credentials.json. Supports cc-switch compatibility:
      *  leave unset to let Claude Code resolve auth dynamically. */
     apiKey: string | undefined;
+    /** Extra environment variables passed only to this Claude Code subprocess. */
+    env?: Record<string, string>;
+    /** File containing ANTHROPIC_AUTH_TOKEN for Claude-compatible providers. */
+    authTokenFile?: string;
+    /** Optional Volcengine Ark control-plane credentials for Coding/Agent Plan quota. */
+    arkQuota?: ArkQuotaConfig;
     outputsBaseDir: string;
     downloadsDir: string;
   };
@@ -42,6 +48,18 @@ export interface BotConfigBase {
   codex?: CodexBotConfig;
   /** Gemini-specific overrides. Populated only when engine === 'gemini'. */
   gemini?: GeminiBotConfig;
+  /** Antigravity-specific overrides. Populated only when engine === 'antigravity'. */
+  antigravity?: AntigravityBotConfig;
+  /**
+   * Optional map: Feishu chatId → list of peer bot names that also live in
+   * that chat. When set, MessageBridge.handleMessage fills apiContext with
+   * groupMembers + groupId (= chatId) so the engine's system prompt includes
+   * the "## Group Chat" hint teaching the bot to use
+   * `mb talk <peer> grouptalk-<chatId>-<peer> "..."` for visible inter-bot
+   * dialogue. Without this map, the bot operates as a solo bot even if
+   * other bots happen to be in the same Feishu chat.
+   */
+  feishuGroups?: Record<string, string[]>;
 }
 
 /** Gemini-specific overrides. Populated only when engine === 'gemini'. */
@@ -57,11 +75,73 @@ export interface GeminiBotConfig {
   env?: Record<string, string>;
 }
 
-/** Codex-specific overrides. Populated only when engine === 'codex'. */
-export interface CodexBotConfig {
+/** One pre-authenticated Antigravity account runner. Credentials stay outside MetaBot. */
+export interface AntigravityAccountConfig {
+  /**
+   * Absolute path to an executable wrapper for this account. The wrapper must
+   * launch `agy` with that account's explicitly isolated profile directory and
+   * forward argv. The profile mechanism is deployment-specific and must be
+   * revalidated after every CLI upgrade.
+   */
+  runner: string;
+}
+
+export const ANTIGRAVITY_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type AntigravityReasoningEffort = (typeof ANTIGRAVITY_REASONING_EFFORTS)[number];
+export function isAntigravityReasoningEffort(value: unknown): value is AntigravityReasoningEffort {
+  return typeof value === 'string' && ANTIGRAVITY_REASONING_EFFORTS.includes(value as AntigravityReasoningEffort);
+}
+
+/** Antigravity CLI overrides. Account credentials remain in the CLI's secure keyring. */
+export interface AntigravityBotConfig {
   executable?: string;
   model?: string;
   displayModel?: string;
+  effort?: AntigravityReasoningEffort;
+  /** Enable the CLI terminal sandbox. Defaults to true in the executor. */
+  sandbox?: boolean;
+  /**
+   * Auto-approve every Antigravity tool permission request. This gives the
+   * root-running CLI unrestricted host access and supersedes `sandbox`.
+   */
+  dangerouslySkipPermissions?: boolean;
+  /** Antigravity print timeout, for example "15m". */
+  printTimeout?: string;
+  /** Optional custom Antigravity agent name. */
+  agent?: string;
+  /** Context window size in tokens for display only. */
+  contextWindow?: number;
+  extraArgs?: string[];
+  env?: Record<string, string>;
+  /** Named isolated account runners, selectable manually or by opt-in quota failover. */
+  accounts?: Record<string, AntigravityAccountConfig>;
+  /** Retry explicit quota exhaustion only before any work; shared across chats. */
+  quotaFailover?: boolean;
+  /** Required when accounts are configured. */
+  defaultAccount?: string;
+}
+
+export type CodexContextMode = 'normal' | 'long';
+
+export const CODEX_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+
+export type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORTS)[number];
+
+export function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort {
+  return typeof value === 'string' && (CODEX_REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
+/** Codex-specific overrides. Populated only when engine === 'codex'. */
+export interface CodexBotConfig {
+  executable?: string;
+  /** Codex execution transport. 'exec' keeps the legacy codex exec path; 'app-server' enables official thread APIs like goal. */
+  transport?: 'exec' | 'app-server';
+  model?: string;
+  displayModel?: string;
+  /** Fallback reasoning effort when the selected model has no model-specific entry. */
+  reasoningEffort?: CodexReasoningEffort;
+  /** Per-model reasoning defaults. Exact model names take precedence over reasoningEffort. */
+  reasoningEffortByModel?: Record<string, CodexReasoningEffort>;
   profile?: string;
   approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
   sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -70,6 +150,12 @@ export interface CodexBotConfig {
   contextWindow?: number;
   extraArgs?: string[];
   env?: Record<string, string>;
+  /**
+   * Browser origins that MetaBot may approve automatically when Codex app-server
+   * asks for browser-origin access. Exact origins only, e.g.
+   * "https://chatgpt.com".
+   */
+  autoApproveBrowserOrigins?: string[];
 }
 
 /** Feishu bot config (extends base with Feishu credentials). */
@@ -103,11 +189,24 @@ export interface PeerConfig {
   secret?: string;
 }
 
+export interface ConsensusProfileConfig {
+  /** Panelist bots that produce independent takes and critiques. */
+  panelists: string[];
+  /** Optional non-panelist bot used first in Phase 4 synthesis. */
+  synthesizerBot?: string;
+  type?: 'empirical' | 'architectural' | 'preference';
+  stakes?: 'low' | 'medium' | 'high';
+  costCapUsd?: number;
+  maxRounds?: number;
+}
+
 export interface AppConfig {
   feishuBots: BotConfig[];
   telegramBots: TelegramBotConfig[];
   webBots: BotConfigBase[];
   wechatBots: WechatBotConfig[];
+  /** Optional named consensus presets. Bot names are deployment-local. */
+  consensusProfiles: Record<string, ConsensusProfileConfig>;
   /** Dedicated Feishu service app for wiki sync & doc reader (independent of chat bots). */
   feishuService?: {
     appId: string;
@@ -161,6 +260,26 @@ export interface KimiJsonConfig {
   contextWindow?: number;
 }
 
+/** Claude-specific overrides in bots.json. */
+export interface ClaudeJsonConfig {
+  env?: Record<string, string>;
+  authTokenFile?: string;
+  arkQuota?: ArkQuotaJsonConfig;
+}
+
+export interface ArkQuotaJsonConfig {
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  accessKeyIdFile?: string;
+  secretAccessKeyFile?: string;
+  region?: string;
+}
+
+export interface ArkQuotaConfig extends ArkQuotaJsonConfig {
+  accessKeyIdFile?: string;
+  secretAccessKeyFile?: string;
+}
+
 /** Gemini-specific overrides in bots.json. */
 export interface GeminiJsonConfig {
   executable?: string;
@@ -172,11 +291,18 @@ export interface GeminiJsonConfig {
   env?: Record<string, string>;
 }
 
+/** Antigravity-specific overrides in bots.json. */
+export type AntigravityJsonConfig = AntigravityBotConfig;
+
 /** Codex-specific overrides in bots.json. */
 export interface CodexJsonConfig {
   executable?: string;
+  /** Codex execution transport. 'exec' keeps the legacy codex exec path; 'app-server' enables official thread APIs like goal. */
+  transport?: 'exec' | 'app-server';
   model?: string;
   displayModel?: string;
+  reasoningEffort?: CodexReasoningEffort;
+  reasoningEffortByModel?: Record<string, CodexReasoningEffort>;
   profile?: string;
   approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
   sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -185,14 +311,17 @@ export interface CodexJsonConfig {
   contextWindow?: number;
   extraArgs?: string[];
   env?: Record<string, string>;
+  autoApproveBrowserOrigins?: string[];
 }
 
 /** Fields shared across all bot JSON entries (engine selection and engine overrides). */
 interface EngineJsonFields {
   engine?: EngineName;
+  claude?: ClaudeJsonConfig;
   kimi?: KimiJsonConfig;
   codex?: CodexJsonConfig;
   gemini?: GeminiJsonConfig;
+  antigravity?: AntigravityJsonConfig;
 }
 
 export interface FeishuBotJsonEntry extends EngineJsonFields {
@@ -214,11 +343,25 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   downloadsDir?: string;
   /** When true, respond to all messages in group chats without requiring @mention. */
   groupNoMention?: boolean;
+  /**
+   * Optional map: Feishu chatId → list of peer bot names (this bot's name may
+   * be included or omitted; it is auto-filtered out). Declares which other
+   * metabot-managed bots also live in that chat so the engine's system prompt
+   * can teach the bot how to reach them via `mb talk`.
+   *
+   * Example:
+   *   "feishuGroups": {
+   *     "oc_d1e2d41e0427d84d2aa3b7f3cf81509f": ["gemini"],
+   *     "oc_a9b393cd795f4dd7de3f0cf0b5193335": ["gemini", "codex-helper"]
+   *   }
+   */
+  feishuGroups?: Record<string, string[]>;
 }
 
 function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
   const codex = buildCodexConfig(entry.codex);
   const gemini = buildGeminiConfig(entry.gemini);
+  const antigravity = buildAntigravityConfig(entry.antigravity);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
@@ -232,6 +375,8 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
+    ...(entry.feishuGroups ? { feishuGroups: entry.feishuGroups } : {}),
     feishu: {
       appId: entry.feishuAppId,
       appSecret: entry.feishuAppSecret,
@@ -263,6 +408,7 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
 function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
   const codex = buildCodexConfig(entry.codex);
   const gemini = buildGeminiConfig(entry.gemini);
+  const antigravity = buildAntigravityConfig(entry.antigravity);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
@@ -275,6 +421,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     telegram: {
       botToken: entry.telegramBotToken,
     },
@@ -303,6 +450,7 @@ export interface WebBotJsonEntry extends EngineJsonFields {
 export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
   const codex = buildCodexConfig(entry.codex);
   const gemini = buildGeminiConfig(entry.gemini);
+  const antigravity = buildAntigravityConfig(entry.antigravity);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
@@ -315,6 +463,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     claude: buildClaudeConfig(entry),
   };
 }
@@ -338,6 +487,7 @@ export interface WechatBotJsonEntry extends EngineJsonFields {
 function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
   const codex = buildCodexConfig(entry.codex);
   const gemini = buildGeminiConfig(entry.gemini);
+  const antigravity = buildAntigravityConfig(entry.antigravity);
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
@@ -345,6 +495,7 @@ function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     wechat: {
       ilinkBaseUrl: entry.ilinkBaseUrl,
       botToken: entry.wechatBotToken,
@@ -361,30 +512,66 @@ function buildClaudeConfig(entry: {
   maxBudgetUsd?: number;
   model?: string;
   apiKey?: string;
+  claude?: ClaudeJsonConfig;
   outputsBaseDir?: string;
   downloadsDir?: string;
 }): BotConfigBase['claude'] {
   return {
     defaultWorkingDirectory: expandUserPath(entry.defaultWorkingDirectory),
     maxTurns: entry.maxTurns ?? (process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined),
-    maxBudgetUsd: entry.maxBudgetUsd ?? (process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined),
-    model: entry.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-opus-4-7',
+    maxBudgetUsd:
+      entry.maxBudgetUsd ??
+      (process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined),
+    model: entry.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-opus-4-8',
     apiKey: entry.apiKey || undefined,
-    outputsBaseDir: entry.outputsBaseDir || process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
-    downloadsDir: entry.downloadsDir || process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
+    ...(entry.claude?.env ? { env: entry.claude.env } : {}),
+    ...(entry.claude?.authTokenFile ? { authTokenFile: expandUserPath(entry.claude.authTokenFile) } : {}),
+    ...(entry.claude?.arkQuota
+      ? {
+          arkQuota: {
+            ...entry.claude.arkQuota,
+            ...(entry.claude.arkQuota.accessKeyIdFile
+              ? { accessKeyIdFile: expandUserPath(entry.claude.arkQuota.accessKeyIdFile) }
+              : {}),
+            ...(entry.claude.arkQuota.secretAccessKeyFile
+              ? { secretAccessKeyFile: expandUserPath(entry.claude.arkQuota.secretAccessKeyFile) }
+              : {}),
+          },
+        }
+      : {}),
+    outputsBaseDir:
+      entry.outputsBaseDir ||
+      process.env.OUTPUTS_BASE_DIR ||
+      path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
+    downloadsDir:
+      entry.downloadsDir ||
+      process.env.DOWNLOADS_DIR ||
+      path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
   };
 }
 
 function buildCodexConfig(entry?: CodexJsonConfig): BotConfigBase['codex'] | undefined {
+  const envAutoApproveOrigins = process.env.CODEX_AUTO_APPROVE_BROWSER_ORIGINS?.split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
   const cfg: BotConfigBase['codex'] = {
     ...(process.env.CODEX_EXECUTABLE_PATH ? { executable: process.env.CODEX_EXECUTABLE_PATH } : {}),
+    ...(process.env.CODEX_TRANSPORT ? { transport: process.env.CODEX_TRANSPORT as CodexJsonConfig['transport'] } : {}),
     ...(process.env.CODEX_MODEL ? { model: process.env.CODEX_MODEL } : {}),
     ...(process.env.CODEX_DISPLAY_MODEL ? { displayModel: process.env.CODEX_DISPLAY_MODEL } : {}),
+    ...(isCodexReasoningEffort(process.env.CODEX_REASONING_EFFORT)
+      ? { reasoningEffort: process.env.CODEX_REASONING_EFFORT }
+      : {}),
     ...(process.env.CODEX_PROFILE ? { profile: process.env.CODEX_PROFILE } : {}),
-    ...(process.env.CODEX_APPROVAL_POLICY ? { approvalPolicy: process.env.CODEX_APPROVAL_POLICY as CodexJsonConfig['approvalPolicy'] } : {}),
+    ...(process.env.CODEX_APPROVAL_POLICY
+      ? { approvalPolicy: process.env.CODEX_APPROVAL_POLICY as CodexJsonConfig['approvalPolicy'] }
+      : {}),
     ...(process.env.CODEX_SANDBOX ? { sandbox: process.env.CODEX_SANDBOX as CodexJsonConfig['sandbox'] } : {}),
-    ...(process.env.CODEX_BYPASS_APPROVALS_AND_SANDBOX === 'true' ? { dangerouslyBypassApprovalsAndSandbox: true } : {}),
+    ...(process.env.CODEX_BYPASS_APPROVALS_AND_SANDBOX === 'true'
+      ? { dangerouslyBypassApprovalsAndSandbox: true }
+      : {}),
     ...(process.env.CODEX_CONTEXT_WINDOW ? { contextWindow: parseInt(process.env.CODEX_CONTEXT_WINDOW, 10) } : {}),
+    ...(envAutoApproveOrigins?.length ? { autoApproveBrowserOrigins: envAutoApproveOrigins } : {}),
     ...(entry ?? {}),
   };
   return Object.keys(cfg).length > 0 ? cfg : undefined;
@@ -395,10 +582,55 @@ function buildGeminiConfig(entry?: GeminiJsonConfig): BotConfigBase['gemini'] | 
     ...(process.env.GEMINI_EXECUTABLE_PATH ? { executable: process.env.GEMINI_EXECUTABLE_PATH } : {}),
     ...(process.env.GEMINI_MODEL ? { model: process.env.GEMINI_MODEL } : {}),
     ...(process.env.GEMINI_DISPLAY_MODEL ? { displayModel: process.env.GEMINI_DISPLAY_MODEL } : {}),
-    ...(process.env.GEMINI_APPROVAL_MODE ? { approvalMode: process.env.GEMINI_APPROVAL_MODE as GeminiJsonConfig['approvalMode'] } : {}),
+    ...(process.env.GEMINI_APPROVAL_MODE
+      ? { approvalMode: process.env.GEMINI_APPROVAL_MODE as GeminiJsonConfig['approvalMode'] }
+      : {}),
     ...(process.env.GEMINI_CONTEXT_WINDOW ? { contextWindow: parseInt(process.env.GEMINI_CONTEXT_WINDOW, 10) } : {}),
     ...(entry ?? {}),
   };
+  return Object.keys(cfg).length > 0 ? cfg : undefined;
+}
+
+function buildAntigravityConfig(entry?: AntigravityJsonConfig): BotConfigBase['antigravity'] | undefined {
+  const cfg: BotConfigBase['antigravity'] = {
+    ...(process.env.ANTIGRAVITY_EXECUTABLE_PATH ? { executable: process.env.ANTIGRAVITY_EXECUTABLE_PATH } : {}),
+    ...(process.env.ANTIGRAVITY_MODEL ? { model: process.env.ANTIGRAVITY_MODEL } : {}),
+    ...(process.env.ANTIGRAVITY_DISPLAY_MODEL ? { displayModel: process.env.ANTIGRAVITY_DISPLAY_MODEL } : {}),
+    ...(process.env.ANTIGRAVITY_EFFORT
+      ? { effort: process.env.ANTIGRAVITY_EFFORT as AntigravityJsonConfig['effort'] }
+      : {}),
+    ...(process.env.ANTIGRAVITY_SANDBOX ? { sandbox: process.env.ANTIGRAVITY_SANDBOX !== 'false' } : {}),
+    ...(process.env.ANTIGRAVITY_DANGEROUSLY_SKIP_PERMISSIONS
+      ? {
+          dangerouslySkipPermissions: process.env.ANTIGRAVITY_DANGEROUSLY_SKIP_PERMISSIONS === 'true',
+        }
+      : {}),
+    ...(process.env.ANTIGRAVITY_PRINT_TIMEOUT ? { printTimeout: process.env.ANTIGRAVITY_PRINT_TIMEOUT } : {}),
+    ...(process.env.ANTIGRAVITY_AGENT ? { agent: process.env.ANTIGRAVITY_AGENT } : {}),
+    ...(process.env.ANTIGRAVITY_CONTEXT_WINDOW
+      ? { contextWindow: parseInt(process.env.ANTIGRAVITY_CONTEXT_WINDOW, 10) }
+      : {}),
+    ...(entry ?? {}),
+  };
+  if (cfg.accounts && Object.keys(cfg.accounts).length > 0) {
+    const aliases = Object.keys(cfg.accounts);
+    for (const alias of aliases) {
+      if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(alias)) {
+        throw new Error(
+          `Invalid Antigravity account alias "${alias}". Use lowercase letters, digits, underscore, or hyphen.`,
+        );
+      }
+      const runner = cfg.accounts[alias]?.runner;
+      if (!runner || !path.isAbsolute(runner)) {
+        throw new Error(`Antigravity account "${alias}" must define an absolute runner path.`);
+      }
+    }
+    if (!cfg.defaultAccount || !cfg.accounts[cfg.defaultAccount]) {
+      throw new Error('Antigravity defaultAccount must name one of the configured accounts.');
+    }
+  } else if (cfg.defaultAccount) {
+    throw new Error('Antigravity defaultAccount requires a non-empty accounts map.');
+  }
   return Object.keys(cfg).length > 0 ? cfg : undefined;
 }
 
@@ -407,11 +639,13 @@ function buildGeminiConfig(entry?: GeminiJsonConfig): BotConfigBase['gemini'] | 
 function feishuBotFromEnv(): BotConfig {
   const codex = buildCodexConfig();
   const gemini = buildGeminiConfig();
+  const antigravity = buildAntigravityConfig();
   return {
     name: 'default',
     ...(process.env.METABOT_ENGINE ? { engine: process.env.METABOT_ENGINE as EngineName } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     feishu: {
       appId: required('FEISHU_APP_ID'),
       appSecret: required('FEISHU_APP_SECRET'),
@@ -420,9 +654,10 @@ function feishuBotFromEnv(): BotConfig {
       defaultWorkingDirectory: expandUserPath(required('CLAUDE_DEFAULT_WORKING_DIRECTORY')),
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
-      model: process.env.CLAUDE_MODEL || 'claude-opus-4-7',
+      model: process.env.CLAUDE_MODEL || 'claude-opus-4-8',
       apiKey: undefined,
-      outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
+      outputsBaseDir:
+        process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
     },
   };
@@ -431,11 +666,13 @@ function feishuBotFromEnv(): BotConfig {
 function telegramBotFromEnv(): TelegramBotConfig {
   const codex = buildCodexConfig();
   const gemini = buildGeminiConfig();
+  const antigravity = buildAntigravityConfig();
   return {
     name: 'telegram-default',
     ...(process.env.METABOT_ENGINE ? { engine: process.env.METABOT_ENGINE as EngineName } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     telegram: {
       botToken: required('TELEGRAM_BOT_TOKEN'),
     },
@@ -443,9 +680,10 @@ function telegramBotFromEnv(): TelegramBotConfig {
       defaultWorkingDirectory: expandUserPath(required('CLAUDE_DEFAULT_WORKING_DIRECTORY')),
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
-      model: process.env.CLAUDE_MODEL || 'claude-opus-4-7',
+      model: process.env.CLAUDE_MODEL || 'claude-opus-4-8',
       apiKey: undefined,
-      outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
+      outputsBaseDir:
+        process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
     },
   };
@@ -454,11 +692,13 @@ function telegramBotFromEnv(): TelegramBotConfig {
 function wechatBotFromEnv(): WechatBotConfig {
   const codex = buildCodexConfig();
   const gemini = buildGeminiConfig();
+  const antigravity = buildAntigravityConfig();
   return {
     name: 'wechat-default',
     ...(process.env.METABOT_ENGINE ? { engine: process.env.METABOT_ENGINE as EngineName } : {}),
     ...(codex ? { codex } : {}),
     ...(gemini ? { gemini } : {}),
+    ...(antigravity ? { antigravity } : {}),
     wechat: {
       botToken: process.env.WECHAT_BOT_TOKEN || undefined,
     },
@@ -466,10 +706,14 @@ function wechatBotFromEnv(): WechatBotConfig {
       defaultWorkingDirectory: expandUserPath(required('CLAUDE_DEFAULT_WORKING_DIRECTORY')),
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
-      model: process.env.CLAUDE_MODEL || 'claude-opus-4-7',
+      model: process.env.CLAUDE_MODEL || 'claude-opus-4-8',
       apiKey: undefined,
-      outputsBaseDir: expandUserPath(process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`)),
-      downloadsDir: expandUserPath(process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`)),
+      outputsBaseDir: expandUserPath(
+        process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
+      ),
+      downloadsDir: expandUserPath(
+        process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
+      ),
     },
   };
 }
@@ -482,12 +726,67 @@ export interface PeerJsonEntry {
   secret?: string;
 }
 
+export interface ConsensusProfileJsonEntry {
+  /** Preferred name. */
+  panelists?: string[];
+  /** Backward/ergonomic alias accepted by config loader. */
+  bots?: string[];
+  synthesizerBot?: string;
+  type?: 'empirical' | 'architectural' | 'preference';
+  stakes?: 'low' | 'medium' | 'high';
+  costCapUsd?: number;
+  maxRounds?: number;
+}
+
 export interface BotsJsonNewFormat {
   feishuBots?: FeishuBotJsonEntry[];
   telegramBots?: TelegramBotJsonEntry[];
   webBots?: WebBotJsonEntry[];
   wechatBots?: WechatBotJsonEntry[];
   peers?: PeerJsonEntry[];
+  consensusProfiles?: Record<string, ConsensusProfileJsonEntry>;
+}
+
+function normalizeConsensusProfiles(
+  raw?: Record<string, ConsensusProfileJsonEntry>,
+): Record<string, ConsensusProfileConfig> {
+  if (!raw) return {};
+  const validTypes = new Set(['empirical', 'architectural', 'preference']);
+  const validStakes = new Set(['low', 'medium', 'high']);
+  const profiles: Record<string, ConsensusProfileConfig> = {};
+  for (const [name, profile] of Object.entries(raw)) {
+    const panelists = profile.panelists ?? profile.bots;
+    if (
+      !Array.isArray(panelists) ||
+      panelists.length === 0 ||
+      !panelists.every((b) => typeof b === 'string' && b.trim())
+    ) {
+      throw new Error(`Invalid consensusProfiles.${name}: panelists must be a non-empty string array`);
+    }
+    if (profile.type && !validTypes.has(profile.type)) {
+      throw new Error(`Invalid consensusProfiles.${name}.type: ${profile.type}`);
+    }
+    if (profile.stakes && !validStakes.has(profile.stakes)) {
+      throw new Error(`Invalid consensusProfiles.${name}.stakes: ${profile.stakes}`);
+    }
+    if (profile.costCapUsd !== undefined && (!Number.isFinite(profile.costCapUsd) || profile.costCapUsd < 0)) {
+      throw new Error(`Invalid consensusProfiles.${name}.costCapUsd: must be a non-negative number`);
+    }
+    if (profile.maxRounds !== undefined && (!Number.isInteger(profile.maxRounds) || profile.maxRounds < 1)) {
+      throw new Error(`Invalid consensusProfiles.${name}.maxRounds: must be a positive integer`);
+    }
+    profiles[name] = {
+      panelists: panelists.map((b) => b.trim()),
+      ...(typeof profile.synthesizerBot === 'string' && profile.synthesizerBot.trim()
+        ? { synthesizerBot: profile.synthesizerBot.trim() }
+        : {}),
+      ...(profile.type ? { type: profile.type } : {}),
+      ...(profile.stakes ? { stakes: profile.stakes } : {}),
+      ...(typeof profile.costCapUsd === 'number' ? { costCapUsd: profile.costCapUsd } : {}),
+      ...(typeof profile.maxRounds === 'number' ? { maxRounds: profile.maxRounds } : {}),
+    };
+  }
+  return profiles;
 }
 
 export function loadAppConfig(): AppConfig {
@@ -497,6 +796,7 @@ export function loadAppConfig(): AppConfig {
   let telegramBots: TelegramBotConfig[] = [];
   let webBots: BotConfigBase[] = [];
   let wechatBots: WechatBotConfig[] = [];
+  let consensusProfiles: Record<string, ConsensusProfileConfig> = {};
   let parsedConfig: unknown;
 
   if (botsConfigPath) {
@@ -526,6 +826,7 @@ export function loadAppConfig(): AppConfig {
       if (cfg.wechatBots) {
         wechatBots = cfg.wechatBots.map(wechatBotFromJson);
       }
+      consensusProfiles = normalizeConsensusProfiles(cfg.consensusProfiles);
       if (feishuBots.length === 0 && telegramBots.length === 0 && webBots.length === 0 && wechatBots.length === 0) {
         throw new Error(`BOTS_CONFIG file must define at least one bot: ${resolved}`);
       }
@@ -544,11 +845,17 @@ export function loadAppConfig(): AppConfig {
       wechatBots = [wechatBotFromEnv()];
     }
     if (feishuBots.length === 0 && telegramBots.length === 0 && wechatBots.length === 0) {
-      throw new Error('No bot configured. Set FEISHU_APP_ID/FEISHU_APP_SECRET, TELEGRAM_BOT_TOKEN, or WECHAT_ILINK_ENABLED=true, or use BOTS_CONFIG for multi-bot mode.');
+      throw new Error(
+        'No bot configured. Set FEISHU_APP_ID/FEISHU_APP_SECRET, TELEGRAM_BOT_TOKEN, or WECHAT_ILINK_ENABLED=true, or use BOTS_CONFIG for multi-bot mode.',
+      );
     }
   }
 
-  const memoryServerUrl = (process.env.META_MEMORY_URL || process.env.MEMORY_SERVER_URL || 'http://localhost:8100').replace(/\/+$/, '');
+  const memoryServerUrl = (
+    process.env.META_MEMORY_URL ||
+    process.env.MEMORY_SERVER_URL ||
+    'http://localhost:8100'
+  ).replace(/\/+$/, '');
 
   const apiPort = process.env.API_PORT ? parseInt(process.env.API_PORT, 10) : 9100;
   const apiSecret = process.env.API_SECRET || undefined;
@@ -591,7 +898,9 @@ export function loadAppConfig(): AppConfig {
     }
   }
   if (process.env.METABOT_PEERS) {
-    const urls = process.env.METABOT_PEERS.split(',').map((u) => u.trim()).filter(Boolean);
+    const urls = process.env.METABOT_PEERS.split(',')
+      .map((u) => u.trim())
+      .filter(Boolean);
     const secrets = (process.env.METABOT_PEER_SECRETS || '').split(',').map((s) => s.trim());
     const names = (process.env.METABOT_PEER_NAMES || '').split(',').map((s) => s.trim());
     for (let i = 0; i < urls.length; i++) {
@@ -608,6 +917,7 @@ export function loadAppConfig(): AppConfig {
     telegramBots,
     webBots,
     wechatBots,
+    consensusProfiles,
     feishuService,
     log: {
       level: process.env.LOG_LEVEL || 'info',

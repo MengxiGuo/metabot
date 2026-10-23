@@ -1,5 +1,7 @@
 // Shared types used across IM platforms (Feishu, Telegram, etc.)
 
+import type { CodexReasoningEffort } from './config.js';
+
 export type CardStatus = 'thinking' | 'running' | 'complete' | 'error' | 'waiting_for_input';
 
 export interface ToolCall {
@@ -28,17 +30,35 @@ export interface BackgroundEvent {
   lastEvent?: string;
 }
 
+export interface GoalProgress {
+  threadId?: string;
+  objective: string;
+  status: string;
+  tokenBudget?: number | null;
+  tokensUsed?: number;
+  timeUsedSeconds?: number;
+  /** True when usage includes the current in-flight turn and may differ slightly from `/goal`. */
+  estimated?: boolean;
+  /** Latest goal-level event supplied by the execution transport. */
+  lastEvent?: string;
+}
+
 export interface CardState {
   status: CardStatus;
   userPrompt: string;
   responseText: string;
   toolCalls: ToolCall[];
+  /** Optional header title override (keeps the status color/icon). Used to label
+   *  the split process/conclusion cards as "过程" / "🎯 结论". */
+  cardLabel?: string;
   costUsd?: number;
   durationMs?: number;
   errorMessage?: string;
   pendingQuestion?: PendingQuestion;
   /** Primary model used (e.g. "claude-opus-4-7") */
   model?: string;
+  /** Actual Codex reasoning effort observed for this turn. */
+  reasoningEffort?: CodexReasoningEffort;
   /** Total input+output tokens consumed */
   totalTokens?: number;
   /** Context window size of the primary model */
@@ -47,12 +67,28 @@ export interface CardState {
   sessionCostUsd?: number;
   /** Background tasks (e.g. Monitor) the agent has spawned during this turn. */
   backgroundEvents?: BackgroundEvent[];
-  /** Gemini-specific quota info from Google Code Assist's retrieveUserQuota.
-   *  Other engines won't set this. When present, card footer shows
-   *  `quota: X% used (还有 Yh reset)` instead of `$cost`. */
+  /** Official goal-mode progress, currently emitted by Codex app-server. */
+  goalProgress?: GoalProgress;
+  /** Quota info for flat-tier engines. Gemini (Google Code Assist
+   *  retrieveUserQuota) sets only the primary fields; Codex (account-level
+   *  rate_limits) additionally sets `secondary` for the weekly window. When
+   *  present, card footer shows quota instead of `$cost`. */
   quotaInfo?: {
     usedPct: number;
     hoursToReset: number;
+    label?: string;
+    /** Codex weekly window (rate_limits.secondary). */
+    secondary?: {
+      usedPct: number;
+      hoursToReset: number;
+      label?: string;
+    };
+    /** Optional third window, used by providers that expose monthly limits. */
+    tertiary?: {
+      usedPct: number;
+      hoursToReset: number;
+      label?: string;
+    };
   };
 }
 

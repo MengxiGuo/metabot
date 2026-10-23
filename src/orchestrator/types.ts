@@ -89,6 +89,7 @@ export interface ConsensusEvent {
     | 'fork_triggered'
     | 'consensus_reached'
     | 'consensus_failed'
+    | 'consensus_aborted'
     | 'user_escalated';
   payload: Record<string, unknown>;
 }
@@ -99,6 +100,7 @@ export interface ConsensusState {
   type: ProblemType;
   stakes: Stakes;
   bots: string[]; // ordered list of all bots (some may end up ejected)
+  synthesizerBot: string | null; // optional non-panelist bot used first in Phase 4
   ejected: EjectedBot[];
   phase: Phase;
   round: number;

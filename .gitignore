@@ -2,9 +2,15 @@ node_modules/
 dist/
 .env
 bots.json
+bots.json.bak*
 logs/
+secrets/
+backups/
+schedule_backups_*/
 nohup.out
 *.log
+__pycache__/
+*.pyc
 .DS_Store
 data/
 site/

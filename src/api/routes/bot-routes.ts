@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import type * as http from 'node:http';
 import { addBot, removeBot, updateBot, getBotEntry } from '../bots-config-writer.js';
-import { installSkillsToWorkDir } from '../skills-installer.js';
+import { installSkillsToWorkDir, reconcileCatchupSkillsToWorkDirs } from '../skills-installer.js';
 import { webBotFromJson } from '../../config.js';
 import { resolveEngineName } from '../../engines/index.js';
 import { NullSender } from '../../web/null-sender.js';
@@ -87,6 +87,8 @@ export async function handleBotRoutes(
         ...(body.engine ? { engine: body.engine } : {}),
         ...(body.codex ? { codex: body.codex } : {}),
         ...(body.kimi ? { kimi: body.kimi } : {}),
+        ...(body.gemini ? { gemini: body.gemini } : {}),
+        ...(body.antigravity ? { antigravity: body.antigravity } : {}),
         feishuAppId: appId, feishuAppSecret: appSecret, defaultWorkingDirectory: workDir,
         ...(body.maxTurns ? { maxTurns: body.maxTurns } : {}),
         ...(body.maxBudgetUsd ? { maxBudgetUsd: body.maxBudgetUsd } : {}),
@@ -104,6 +106,8 @@ export async function handleBotRoutes(
         ...(body.engine ? { engine: body.engine } : {}),
         ...(body.codex ? { codex: body.codex } : {}),
         ...(body.kimi ? { kimi: body.kimi } : {}),
+        ...(body.gemini ? { gemini: body.gemini } : {}),
+        ...(body.antigravity ? { antigravity: body.antigravity } : {}),
         telegramBotToken: token, defaultWorkingDirectory: workDir,
         ...(body.maxTurns ? { maxTurns: body.maxTurns } : {}),
         ...(body.maxBudgetUsd ? { maxBudgetUsd: body.maxBudgetUsd } : {}),
@@ -120,6 +124,8 @@ export async function handleBotRoutes(
         ...(body.engine ? { engine: body.engine } : {}),
         ...(body.codex ? { codex: body.codex } : {}),
         ...(body.kimi ? { kimi: body.kimi } : {}),
+        ...(body.gemini ? { gemini: body.gemini } : {}),
+        ...(body.antigravity ? { antigravity: body.antigravity } : {}),
         defaultWorkingDirectory: workDir,
         ...(body.maxTurns ? { maxTurns: body.maxTurns } : {}),
         ...(body.maxBudgetUsd ? { maxBudgetUsd: body.maxBudgetUsd } : {}),
@@ -130,6 +136,10 @@ export async function handleBotRoutes(
     try {
       const workDir = body.defaultWorkingDirectory as string;
       fs.mkdirSync(workDir, { recursive: true });
+
+      // Catchup is a required runtime workflow for every engine, independent
+      // of whether the caller requests the optional general skill bundle.
+      reconcileCatchupSkillsToWorkDirs([workDir], logger);
 
       addBot(botsConfigPath, platform as 'feishu' | 'telegram' | 'web', entry as any);
       logger.info({ name, platform }, 'Bot added to config');
@@ -260,5 +270,9 @@ function defaultModelForConfig(config: import('../../config.js').BotConfigBase):
       return config.kimi?.model;
     case 'codex':
       return config.codex?.model || config.codex?.displayModel;
+    case 'gemini':
+      return config.gemini?.model || config.gemini?.displayModel;
+    case 'antigravity':
+      return config.antigravity?.model || config.antigravity?.displayModel;
   }
 }

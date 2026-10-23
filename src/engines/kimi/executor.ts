@@ -3,12 +3,8 @@ import { createSession, isLoggedIn, KimiPaths, parseConfig } from '@moonshot-ai/
 import type { Session, Turn, StreamEvent, RunResult } from '@moonshot-ai/kimi-agent-sdk';
 import type { BotConfigBase } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
-import type {
-  ApiContext,
-  ExecutionHandle,
-  ExecutorOptions,
-  SDKMessage,
-} from '../claude/executor.js';
+import type { ApiContext, ExecutionHandle, ExecutorOptions, SDKMessage } from '../claude/executor.js';
+import { INDEPENDENT_JUDGMENT_POLICY, INDEPENDENT_JUDGMENT_POLICY_VERSION } from '../shared/independent-judgment.js';
 
 /**
  * Executor that drives `@moonshot-ai/kimi-agent-sdk` and translates its
@@ -46,7 +42,7 @@ export class KimiExecutor {
       if (!isLoggedIn()) {
         throw new Error(
           'Kimi CLI is not logged in. Run `kimi login` in a separate terminal ' +
-          'to authenticate with your Moonshot subscription, then restart MetaBot.'
+            'to authenticate with your Moonshot subscription, then restart MetaBot.',
         );
       }
     } catch (err: any) {
@@ -61,7 +57,13 @@ export class KimiExecutor {
     this.assertLoggedIn();
 
     this.logger.info(
-      { cwd, hasSession: !!sessionId, outputsDir, engine: 'kimi' },
+      {
+        cwd,
+        hasSession: !!sessionId,
+        outputsDir,
+        engine: 'kimi',
+        judgmentPolicyVersion: INDEPENDENT_JUDGMENT_POLICY_VERSION,
+      },
       'Starting Kimi execution (multi-turn)',
     );
 
@@ -77,7 +79,9 @@ export class KimiExecutor {
     // Wire abort signal → turn.interrupt(). Kimi's SDK doesn't accept an
     // AbortSignal directly, so we forward cancellation manually.
     if (abortController.signal.aborted) {
-      turn.interrupt().catch(() => { /* already aborting */ });
+      turn.interrupt().catch(() => {
+        /* already aborting */
+      });
     } else {
       abortController.signal.addEventListener(
         'abort',
@@ -187,11 +191,7 @@ export class KimiExecutor {
     }
   }
 
-  private createKimiSession(
-    cwd: string,
-    sessionId: string | undefined,
-    options: ExecutorOptions,
-  ): Session {
+  private createKimiSession(cwd: string, sessionId: string | undefined, options: ExecutorOptions): Session {
     const kimiOpts = this.config.kimi ?? {};
     return createSession({
       workDir: cwd,
@@ -233,9 +233,7 @@ export class KimiExecutor {
         const headerMatch = section.match(/^models\."([^"]+)"\]/);
         if (!headerMatch) continue;
         const sectionId = headerMatch[1];
-        const shortId = sectionId.includes('/')
-          ? sectionId.slice(sectionId.lastIndexOf('/') + 1)
-          : sectionId;
+        const shortId = sectionId.includes('/') ? sectionId.slice(sectionId.lastIndexOf('/') + 1) : sectionId;
         if (sectionId !== modelId && shortId !== modelId) continue;
         const displayName = section.match(/^\s*display_name\s*=\s*"([^"]+)"/m);
         if (displayName) return displayName[1];
@@ -264,18 +262,24 @@ export class KimiExecutor {
         `## MetaBot API\nYou are running as bot "${apiContext.botName}" in chat "${apiContext.chatId}".\nUse the /metabot skill for full API documentation (agent bus, scheduling, bot management).`,
       );
 
+      // See claude/executor.ts for the two-mode rationale.
       if (apiContext.groupMembers && apiContext.groupMembers.length > 0) {
         const others = apiContext.groupMembers.filter((m) => m !== apiContext.botName);
         const groupId = apiContext.groupId;
-        if (groupId) {
+        if (groupId && groupId !== apiContext.chatId) {
           sections.push(
             `## Group Chat\nYou are in a group chat (group: ${groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${groupId}-<botName> "message"\``,
+          );
+        } else if (others.length > 0) {
+          sections.push(
+            `## Group Chat\nYou are in a Feishu group chat (chat: ${apiContext.chatId}) with these other bots: ${others.join(', ')}.\nTo talk to one of them with both your prompt and their reply visible in this group, use: \`mb talk <peerBot> ${apiContext.chatId} "<message>"\`\nIMPORTANT: Use the real chat id (${apiContext.chatId}), NOT a grouptalk- prefix.`,
           );
         }
       }
     }
 
-    if (sections.length === 0) return prompt;
+    sections.push(INDEPENDENT_JUDGMENT_POLICY);
+
     return `${prompt}\n\n---\n\n${sections.join('\n\n')}`;
   }
 }
@@ -323,14 +327,16 @@ function translateEvent(event: StreamEvent, state: TurnState, logger: Logger): S
       if (part.type === 'text' && part.text) {
         state.accumulatedText += part.text;
         // Emit a streaming text_delta so StreamProcessor appends it live.
-        return [{
-          type: 'stream_event',
-          session_id: state.sessionId,
-          event: {
-            type: 'content_block_delta',
-            delta: { type: 'text_delta', text: part.text },
+        return [
+          {
+            type: 'stream_event',
+            session_id: state.sessionId,
+            event: {
+              type: 'content_block_delta',
+              delta: { type: 'text_delta', text: part.text },
+            },
           },
-        }];
+        ];
       }
       // Thinking, images, audio, video — no rendering in the current card.
       return [];
@@ -342,13 +348,15 @@ function translateEvent(event: StreamEvent, state: TurnState, logger: Logger): S
       const args = call.function.arguments ?? '';
       state.openToolCalls.set(call.id, { name, argsBuffer: args });
       const input = safeParseJson(args);
-      return [{
-        type: 'assistant',
-        session_id: state.sessionId,
-        message: {
-          content: [{ type: 'tool_use', id: call.id, name, input }],
+      return [
+        {
+          type: 'assistant',
+          session_id: state.sessionId,
+          message: {
+            content: [{ type: 'tool_use', id: call.id, name, input }],
+          },
         },
-      }];
+      ];
     }
 
     case 'ToolCallPart':
@@ -360,16 +368,17 @@ function translateEvent(event: StreamEvent, state: TurnState, logger: Logger): S
     case 'ToolResult': {
       const tr = event.payload;
       state.openToolCalls.delete(tr.tool_call_id);
-      const output = typeof tr.return_value.output === 'string'
-        ? tr.return_value.output
-        : JSON.stringify(tr.return_value.output);
-      return [{
-        type: 'user',
-        session_id: state.sessionId,
-        message: {
-          content: [{ type: 'tool_result', id: tr.tool_call_id, text: output }],
+      const output =
+        typeof tr.return_value.output === 'string' ? tr.return_value.output : JSON.stringify(tr.return_value.output);
+      return [
+        {
+          type: 'user',
+          session_id: state.sessionId,
+          message: {
+            content: [{ type: 'tool_result', id: tr.tool_call_id, text: output }],
+          },
         },
-      }];
+      ];
     }
 
     case 'StatusUpdate': {
@@ -387,9 +396,10 @@ function translateEvent(event: StreamEvent, state: TurnState, logger: Logger): S
         } | null;
       };
       if (payload.token_usage) {
-        state.lastInputTokens = payload.token_usage.input_other
-          + payload.token_usage.input_cache_read
-          + payload.token_usage.input_cache_creation;
+        state.lastInputTokens =
+          payload.token_usage.input_other +
+          payload.token_usage.input_cache_read +
+          payload.token_usage.input_cache_creation;
         state.lastOutputTokens = payload.token_usage.output;
       } else if (typeof payload.context_usage === 'number') {
         // Fallback: only a single cumulative number is available.
@@ -412,19 +422,24 @@ function translateEvent(event: StreamEvent, state: TurnState, logger: Logger): S
       // "full message text replaces accumulated stream text" branch captures
       // the complete answer text.
       if (state.accumulatedText) {
-        return [{
-          type: 'assistant',
-          session_id: state.sessionId,
-          message: {
-            content: [{ type: 'text', text: state.accumulatedText }],
+        return [
+          {
+            type: 'assistant',
+            session_id: state.sessionId,
+            message: {
+              content: [{ type: 'text', text: state.accumulatedText }],
+            },
           },
-        }];
+        ];
       }
       return [];
 
     // WireRequest types that arrive in the iterator
     case 'ApprovalRequest':
-      logger.info({ requestId: (event.payload as any).request_id }, 'Kimi ApprovalRequest — yoloMode should have allowed this');
+      logger.info(
+        { requestId: (event.payload as any).request_id },
+        'Kimi ApprovalRequest — yoloMode should have allowed this',
+      );
       return [];
     case 'ToolCallRequest':
     case 'QuestionRequest':
@@ -439,23 +454,23 @@ function translateEvent(event: StreamEvent, state: TurnState, logger: Logger): S
 
 function buildResultMessage(result: RunResult, state: TurnState): SDKMessage {
   const isError = result.status !== 'finished';
-  const subtype = result.status === 'finished'
-    ? 'success'
-    : result.status === 'cancelled'
-      ? 'error_cancelled'
-      : 'error_max_steps';
+  const subtype =
+    result.status === 'finished' ? 'success' : result.status === 'cancelled' ? 'error_cancelled' : 'error_max_steps';
 
   // Mimic Claude's `modelUsage` shape so StreamProcessor can extract model,
   // contextWindow, and totalTokens without any engine-specific branching.
   // Kimi runs on a subscription — leave costUSD at 0 (the card omits $0).
   const inputTokens = state.lastInputTokens ?? 0;
   const outputTokens = state.lastOutputTokens ?? 0;
-  const modelUsage: Record<string, {
-    contextWindow: number;
-    inputTokens: number;
-    outputTokens: number;
-    costUSD: number;
-  }> = {
+  const modelUsage: Record<
+    string,
+    {
+      contextWindow: number;
+      inputTokens: number;
+      outputTokens: number;
+      costUSD: number;
+    }
+  > = {
     [state.model]: {
       contextWindow: state.contextWindow,
       inputTokens,
@@ -480,5 +495,9 @@ function buildResultMessage(result: RunResult, state: TurnState): SDKMessage {
 
 function safeParseJson(s: string): unknown {
   if (!s) return {};
-  try { return JSON.parse(s); } catch { return { _raw: s }; }
+  try {
+    return JSON.parse(s);
+  } catch {
+    return { _raw: s };
+  }
 }

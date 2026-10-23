@@ -3,11 +3,24 @@ import type {
   BackgroundEvent,
   BackgroundTaskStatus,
   CardState,
+  GoalProgress,
   ToolCall,
   PendingQuestion,
 } from '../../feishu/card-builder.js';
+import { detectUpstreamApiError } from '../../utils/upstream-api-error.js';
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.tiff']);
+
+const CLAUDE_CONTEXT_WINDOW_OVERRIDES: Record<string, number> = {
+  // Claude Agent SDK may currently report 200k for Fable 5 even though the
+  // public model spec and observed Claude Code sessions support 1M context.
+  'claude-fable-5': 1_000_000,
+  'claude-mythos-5': 1_000_000,
+};
+
+function normalizeClaudeContextWindow(model: string, reportedWindow: number | undefined): number | undefined {
+  return CLAUDE_CONTEXT_WINDOW_OVERRIDES[model] ?? reportedWindow;
+}
 
 /**
  * Tools handled by the SDK in bypassPermissions mode.
@@ -24,6 +37,12 @@ export interface DetectedTool {
 
 export class StreamProcessor {
   private responseText = '';
+  // Top-level assistant text must accumulate across the WHOLE turn. The model often
+  // emits an explanation, makes a tool call, then a short sign-off — that is multiple
+  // text blocks. message.result and a naive `responseText = block.text` keep only the
+  // LAST block, silently dropping everything the user saw stream before the tool call.
+  private _segments: string[] = []; // finalized top-level text blocks, in order (authoritative)
+  private _streamingText = ''; // current in-flight block (live preview, from stream deltas)
   private toolCalls: ToolCall[] = [];
   private currentToolName: string | null = null;
   private sessionId: string | undefined;
@@ -34,21 +53,54 @@ export class StreamProcessor {
   private _sdkHandledTools: DetectedTool[] = [];
   private _planFilePath: string | null = null;
   private _model: string | undefined;
+  private _reasoningEffort: CardState['reasoningEffort'];
   private _totalTokens: number | undefined;
   private _contextWindow: number | undefined;
-  private _quotaInfo: { usedPct: number; hoursToReset: number } | undefined;
+  private _quotaInfo:
+    | {
+        usedPct: number;
+        hoursToReset: number;
+        label?: string;
+        secondary?: { usedPct: number; hoursToReset: number; label?: string };
+        tertiary?: { usedPct: number; hoursToReset: number; label?: string };
+      }
+    | undefined;
   // Track per-API-call usage from stream events for accurate context window display
   private _lastInputTokens: number | undefined;
   private _lastOutputTokens: number | undefined;
+  private _goalProgress: GoalProgress | undefined;
+  private _engineActive = false;
   // Live background tasks (Monitor, etc.) — task_id → latest rollup.
   private _backgroundEvents: Map<string, BackgroundEvent> = new Map();
 
   constructor(private userPrompt: string) {}
 
+  // Recompute the visible response text = all committed blocks + the in-flight block.
+  private _syncResponseText(): void {
+    const joined = this._segments.join('\n\n');
+    this.responseText = this._streamingText
+      ? joined
+        ? joined + '\n\n' + this._streamingText
+        : this._streamingText
+      : joined;
+  }
+
+  // Top-level text blocks in order (committed + in-flight). Used to split the turn
+  // into separate process / conclusion cards.
+  getTextSegments(): string[] {
+    return this._streamingText ? [...this._segments, this._streamingText] : [...this._segments];
+  }
+
   processMessage(message: SDKMessage): CardState {
     // Capture session_id from any message
     if (message.session_id) {
       this.sessionId = message.session_id;
+    }
+    if (message.goalProgress) {
+      this._goalProgress = {
+        ...this._goalProgress,
+        ...message.goalProgress,
+      };
     }
 
     switch (message.type) {
@@ -77,13 +129,24 @@ export class StreamProcessor {
 
       case 'tool_use_summary':
         break;
+
+      case 'engine_activity':
+      case 'engine_heartbeat':
+        this._engineActive = true;
+        if (message.duration_ms !== undefined) this.durationMs = message.duration_ms;
+        break;
     }
 
     // Determine running status
     const hasActiveTools = this.toolCalls.some((t) => t.status === 'running');
-    const status = this._pendingQuestions.length > 0
-      ? 'waiting_for_input'
-      : hasActiveTools ? 'running' : this.responseText ? 'running' : 'thinking';
+    const status =
+      this._pendingQuestions.length > 0
+        ? 'waiting_for_input'
+        : hasActiveTools || this._engineActive
+          ? 'running'
+          : this.responseText
+            ? 'running'
+            : 'thinking';
 
     return {
       status,
@@ -93,9 +156,8 @@ export class StreamProcessor {
       costUsd: this.costUsd,
       durationMs: this.durationMs,
       pendingQuestion: this._pendingQuestions[0] || undefined,
-      backgroundEvents: this._backgroundEvents.size > 0
-        ? [...this._backgroundEvents.values()]
-        : undefined,
+      goalProgress: this._goalProgress,
+      backgroundEvents: this._backgroundEvents.size > 0 ? [...this._backgroundEvents.values()] : undefined,
     };
   }
 
@@ -124,16 +186,19 @@ export class StreamProcessor {
 
     const prior = this._backgroundEvents.get(taskId);
     const patch = (m.patch as Record<string, unknown> | undefined) ?? undefined;
-    const description = typeof m.description === 'string'
-      ? m.description
-      : (typeof patch?.description === 'string' ? patch.description as string : prior?.description);
+    const description =
+      typeof m.description === 'string'
+        ? m.description
+        : typeof patch?.description === 'string'
+          ? (patch.description as string)
+          : prior?.description;
 
     let status: BackgroundTaskStatus = prior?.status ?? 'running';
     if (subtype === 'task_notification') {
       const s = typeof m.status === 'string' ? m.status : undefined;
       if (s === 'completed' || s === 'failed' || s === 'stopped') status = s;
     } else if (subtype === 'task_updated') {
-      const s = typeof patch?.status === 'string' ? patch.status as string : undefined;
+      const s = typeof patch?.status === 'string' ? (patch.status as string) : undefined;
       if (s === 'completed') status = 'completed';
       else if (s === 'failed' || s === 'killed') status = 'failed';
       else if (s === 'running') status = 'running';
@@ -173,8 +238,15 @@ export class StreamProcessor {
       if (block.type === 'text' && block.text) {
         // Only accumulate text from top-level assistant messages (not subagent)
         if (message.parent_tool_use_id === null || message.parent_tool_use_id === undefined) {
-          // Full message text replaces accumulated stream text
-          this.responseText = block.text;
+          // Commit this finalized top-level text block, accumulating across the turn
+          // instead of overwriting. The dedup guard avoids double-counting if the SDK
+          // re-emits the same assistant message. The live preview for this block is
+          // now superseded by the authoritative text.
+          if (this._segments[this._segments.length - 1] !== block.text) {
+            this._segments.push(block.text);
+          }
+          this._streamingText = '';
+          this._syncResponseText();
         }
       } else if (block.type === 'tool_use' && block.name) {
         this.addToolCall(block.name, block.input);
@@ -201,9 +273,8 @@ export class StreamProcessor {
     if (event.type === 'message_start') {
       const usage = (event as any).message?.usage;
       if (usage) {
-        this._lastInputTokens = (usage.input_tokens ?? 0)
-          + (usage.cache_read_input_tokens ?? 0)
-          + (usage.cache_creation_input_tokens ?? 0);
+        this._lastInputTokens =
+          (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
       }
     } else if (event.type === 'message_delta') {
       const usage = (event as any).usage;
@@ -223,12 +294,15 @@ export class StreamProcessor {
         this.addToolCall(block.name, undefined);
       }
       if (block?.type === 'text') {
-        // Reset for new text block
+        // New text block starting — reset the live preview buffer (the previous
+        // block is committed via the authoritative assistant message).
+        this._streamingText = '';
       }
     } else if (event.type === 'content_block_delta') {
       const delta = event.delta;
       if (delta?.type === 'text_delta' && delta.text) {
-        this.responseText += delta.text;
+        this._streamingText += delta.text;
+        this._syncResponseText();
       }
     } else if (event.type === 'content_block_stop') {
       // Tool may be complete
@@ -240,6 +314,7 @@ export class StreamProcessor {
     this.costUsd = message.total_cost_usd;
     this.durationMs = message.duration_ms;
     if (message.quotaInfo) this._quotaInfo = message.quotaInfo;
+    if (message.reasoningEffort) this._reasoningEffort = message.reasoningEffort;
 
     // Extract model usage info (per-model breakdown from SDK)
     if (message.modelUsage) {
@@ -247,11 +322,11 @@ export class StreamProcessor {
       if (models.length > 0) {
         // Primary model is the one with highest cost
         const primaryModel = models.reduce((a, b) =>
-          (message.modelUsage![a].costUSD ?? 0) >= (message.modelUsage![b].costUSD ?? 0) ? a : b
+          (message.modelUsage![a].costUSD ?? 0) >= (message.modelUsage![b].costUSD ?? 0) ? a : b,
         );
         const mu = message.modelUsage[primaryModel];
         this._model = primaryModel;
-        this._contextWindow = mu.contextWindow;
+        this._contextWindow = normalizeClaudeContextWindow(primaryModel, mu.contextWindow);
         // Use last API call's tokens from stream events (accurate context window occupation)
         // Falls back to cumulative modelUsage input+output if stream events weren't captured
         if (this._lastInputTokens != null) {
@@ -259,8 +334,8 @@ export class StreamProcessor {
         } else {
           let totalTokens = 0;
           for (const m of models) {
-            totalTokens += (message.modelUsage![m].inputTokens ?? 0);
-            totalTokens += (message.modelUsage![m].outputTokens ?? 0);
+            totalTokens += message.modelUsage![m].inputTokens ?? 0;
+            totalTokens += message.modelUsage![m].outputTokens ?? 0;
           }
           this._totalTokens = totalTokens;
         }
@@ -272,28 +347,39 @@ export class StreamProcessor {
       tool.status = 'done';
     }
 
-    const resultText = message.result || this.responseText;
+    // Prefer our accumulated multi-block text over message.result. The SDK's result
+    // field is only the LAST assistant text block, so a turn that emitted text both
+    // before and after a tool call would lose the earlier (often the substantive)
+    // part. this.responseText holds the full accumulation; fall back to result only
+    // if it is somehow longer (e.g. accumulation missed something).
+    const fullText =
+      this.responseText && this.responseText.length >= (message.result || '').length
+        ? this.responseText
+        : message.result || this.responseText;
+    const resultText = stripLeakedToolCalls(fullText);
     const isError = message.subtype !== 'success';
     // SDK sometimes wraps API errors as "success" with the error text as result
     const isApiError = !isError && isApiErrorResult(resultText);
 
     return {
-      status: (isError || isApiError) ? 'error' : 'complete',
+      status: isError || isApiError ? 'error' : 'complete',
       userPrompt: this.userPrompt,
       responseText: isApiError ? '' : resultText,
       toolCalls: [...this.toolCalls],
       costUsd: this.costUsd,
       durationMs: this.durationMs,
       errorMessage: isError
-        ? (message.errors?.join('; ') || `Ended with: ${message.subtype}`)
-        : isApiError ? resultText : undefined,
+        ? message.errors?.join('; ') || `Ended with: ${message.subtype}`
+        : isApiError
+          ? resultText
+          : undefined,
       model: this._model,
+      reasoningEffort: this._reasoningEffort,
       totalTokens: this._totalTokens,
       contextWindow: this._contextWindow,
       quotaInfo: this._quotaInfo,
-      backgroundEvents: this._backgroundEvents.size > 0
-        ? [...this._backgroundEvents.values()]
-        : undefined,
+      goalProgress: this._goalProgress,
+      backgroundEvents: this._backgroundEvents.size > 0 ? [...this._backgroundEvents.values()] : undefined,
     };
   }
 
@@ -319,9 +405,7 @@ export class StreamProcessor {
 
   private completeCurrentTool(): void {
     if (this.currentToolName) {
-      const tool = this.toolCalls.find(
-        (t) => t.name === this.currentToolName && t.status === 'running',
-      );
+      const tool = this.toolCalls.find((t) => t.name === this.currentToolName && t.status === 'running');
       if (tool) {
         tool.status = 'done';
       }
@@ -377,9 +461,14 @@ export class StreamProcessor {
   /** Return the current card state without processing a new message. */
   getCurrentState(): CardState {
     const hasActiveTools = this.toolCalls.some((t) => t.status === 'running');
-    const status = this._pendingQuestions.length > 0
-      ? 'waiting_for_input'
-      : hasActiveTools ? 'running' : this.responseText ? 'running' : 'thinking';
+    const status =
+      this._pendingQuestions.length > 0
+        ? 'waiting_for_input'
+        : hasActiveTools
+          ? 'running'
+          : this.responseText
+            ? 'running'
+            : 'thinking';
     return {
       status,
       userPrompt: this.userPrompt,
@@ -387,10 +476,10 @@ export class StreamProcessor {
       toolCalls: [...this.toolCalls],
       costUsd: this.costUsd,
       durationMs: this.durationMs,
+      reasoningEffort: this._reasoningEffort,
       pendingQuestion: this._pendingQuestions[0] || undefined,
-      backgroundEvents: this._backgroundEvents.size > 0
-        ? [...this._backgroundEvents.values()]
-        : undefined,
+      goalProgress: this._goalProgress,
+      backgroundEvents: this._backgroundEvents.size > 0 ? [...this._backgroundEvents.values()] : undefined,
     };
   }
 
@@ -404,6 +493,24 @@ export class StreamProcessor {
 
   getPlanFilePath(): string | null {
     return this._planFilePath;
+  }
+
+  /**
+   * True if any SDK-tracked background task (Monitor, Bash run_in_background, etc.)
+   * is still running when the turn ends. Used by the bridge to decide whether to
+   * schedule an auto-drain phantom turn so queued task_notification events get
+   * delivered without requiring the user to ping.
+   */
+  hasRunningBackgroundTasks(): boolean {
+    for (const ev of this._backgroundEvents.values()) {
+      if (ev.status === 'running') return true;
+    }
+    return false;
+  }
+
+  /** Snapshot of currently-running background tasks (used for drain logs). */
+  getRunningBackgroundTasks(): BackgroundEvent[] {
+    return [...this._backgroundEvents.values()].filter((ev) => ev.status === 'running');
   }
 }
 
@@ -469,6 +576,25 @@ function truncate(text: string, max: number): string {
 
 /** Detect API error responses that the SDK wraps as successful results */
 function isApiErrorResult(text: string): boolean {
-  if (!text) return false;
-  return /^API Error:\s*\d{3}\s/i.test(text);
+  return detectUpstreamApiError(text) !== undefined;
+}
+
+function stripLeakedToolCalls(text: string): string {
+  if (!text) return text;
+  const original = text;
+  let t = text;
+  // Only strip REAL tool-call leaks (they always carry name="...").
+  // Prose mentions of the tag names (no name= attr) are left untouched.
+  t = t.replace(/<(?:antml:)?function_calls>[\s\S]*?<\/(?:antml:)?function_calls>/g, '');
+  t = t.replace(/<(?:antml:)?invoke\s+name="[\s\S]*?<\/(?:antml:)?invoke>/g, '');
+  // dangling/truncated real invoke (has name=), maybe preceded by a stray 'count' line
+  t = t.replace(/(?:^|\n)[ \t]*(?:count[ \t]*\n)?<(?:antml:)?invoke\s+name="[\s\S]*$/g, '');
+  t = t.replace(/<(?:antml:)?parameter\s+name="[\s\S]*?<\/(?:antml:)?parameter>/g, '');
+  t = t.replace(/<\/?(?:antml:)?parameter\s+name="[^>]*>/g, '');
+  t = t.replace(/<\/?(?:antml:)?function_calls>/g, '');
+  t = t.trim();
+  if (t.length === 0 && original.trim().length > 0) {
+    return '(本轮一个内部工具调用未正确执行，我重试一下)';
+  }
+  return t;
 }

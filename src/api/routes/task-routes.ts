@@ -1,6 +1,16 @@
 import type * as http from 'node:http';
 import { jsonResponse, parseJsonBody } from './helpers.js';
 import type { RouteContext } from './types.js';
+import {
+  normalizeApiTaskResult,
+  type ApiTaskLikeResult,
+  type UpstreamAwareTaskResult,
+} from '../../utils/upstream-api-error.js';
+
+function taskResultStatus(result: UpstreamAwareTaskResult): number {
+  if (result.success) return 200;
+  return result.errorCode ? 502 : 500;
+}
 
 // Prepended to target's prompt when the call comes from another bot via mb talk.
 // Default mode is honest critical evaluation, not agreeable collaboration —
@@ -100,8 +110,10 @@ export async function handleTaskRoutes(
       }
       logger.info({ botName, peerName: targetPeerName, chatId, promptLength: prompt.length }, 'Forwarding talk to peer (qualified)');
       try {
-        const result = await peerManager.forwardTask(peerMatch.peer, { botName, chatId, prompt, sendCards });
-        const statusCode = (result as any).success === false ? 500 : 200;
+        const result = normalizeApiTaskResult(
+          await peerManager.forwardTask(peerMatch.peer, { botName, chatId, prompt, sendCards }) as ApiTaskLikeResult,
+        );
+        const statusCode = taskResultStatus(result);
         jsonResponse(res, statusCode, result);
       } catch (err: any) {
         logger.error({ err, botName, peerName: targetPeerName }, 'Peer forwarding failed');
@@ -163,9 +175,11 @@ export async function handleTaskRoutes(
         (async () => {
           asyncTaskStore.update(asyncTask.id, { status: 'running' });
           try {
-            const result = await bot.bridge.executeApiTask({
-              prompt: effectivePrompt, chatId, userId: 'api', sendCards: sendCards ?? true,
-            });
+            const result = normalizeApiTaskResult(
+              await bot.bridge.executeApiTask({
+                prompt: effectivePrompt, chatId, userId: 'api', sendCards: sendCards ?? true,
+              }),
+            );
             asyncTaskStore.update(asyncTask.id, {
               status: result.success ? 'completed' : 'failed',
               completedAt: Date.now(),
@@ -175,6 +189,10 @@ export async function handleTaskRoutes(
                 costUsd: result.costUsd,
                 durationMs: result.durationMs,
                 error: result.error,
+                errorCode: result.errorCode,
+                upstreamStatus: result.upstreamStatus,
+                upstreamRequestId: result.upstreamRequestId,
+                retryable: result.retryable,
               },
             });
 
@@ -227,25 +245,27 @@ export async function handleTaskRoutes(
       const grouptalkMatch = chatId.match(/^grouptalk-(.+)-[^-]+$/);
       const grouptalkGroupId = grouptalkMatch ? grouptalkMatch[1] : undefined;
 
-      const result = await bot.bridge.executeApiTask({
-        prompt: effectivePrompt,
-        chatId,
-        userId: 'api',
-        sendCards: sendCards ?? true,
-        ...(hasWsSubscribers ? {
-          onUpdate: (state, bridgeMessageId, final) => {
-            const msgType = final ? 'complete' : 'state';
-            subs!.broadcast(chatId, {
-              type: msgType,
-              chatId,
-              messageId: bridgeMessageId,
-              state,
-              botName,
-              ...(grouptalkGroupId ? { groupId: grouptalkGroupId } : {}),
-            });
-          },
-        } : {}),
-      });
+      const result = normalizeApiTaskResult(
+        await bot.bridge.executeApiTask({
+          prompt: effectivePrompt,
+          chatId,
+          userId: 'api',
+          sendCards: sendCards ?? true,
+          ...(hasWsSubscribers ? {
+            onUpdate: (state, bridgeMessageId, final) => {
+              const msgType = final ? 'complete' : 'state';
+              subs!.broadcast(chatId, {
+                type: msgType,
+                chatId,
+                messageId: bridgeMessageId,
+                state,
+                botName,
+                ...(grouptalkGroupId ? { groupId: grouptalkGroupId } : {}),
+              });
+            },
+          } : {}),
+        }),
+      );
 
       if (result.success) {
         circuitBreaker.recordSuccess(botName);
@@ -256,7 +276,7 @@ export async function handleTaskRoutes(
         budgetManager.recordCost(botName, result.costUsd);
       }
 
-      jsonResponse(res, result.success ? 200 : 500, result);
+      jsonResponse(res, taskResultStatus(result), result);
       return true;
     }
 
@@ -267,8 +287,10 @@ export async function handleTaskRoutes(
       if (peerMatch) {
         logger.info({ botName, peerName: peerMatch.peer.name, peerUrl: peerMatch.peer.url, chatId, promptLength: prompt.length }, 'Forwarding talk to peer');
         try {
-          const result = await peerManager.forwardTask(peerMatch.peer, { botName, chatId, prompt, sendCards });
-          const statusCode = (result as any).success === false ? 500 : 200;
+          const result = normalizeApiTaskResult(
+            await peerManager.forwardTask(peerMatch.peer, { botName, chatId, prompt, sendCards }) as ApiTaskLikeResult,
+          );
+          const statusCode = taskResultStatus(result);
           jsonResponse(res, statusCode, result);
         } catch (err: any) {
           logger.error({ err, botName, peerUrl: peerMatch.peer.url }, 'Peer forwarding failed');

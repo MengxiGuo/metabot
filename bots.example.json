@@ -42,9 +42,36 @@
       "feishuAppSecret": "secret4",
       "defaultWorkingDirectory": "/home/user/project-delta",
       "codex": {
-        "model": "gpt-5.4-codex",
+        "model": "gpt-6-astra",
+        "reasoningEffort": "high",
+        "reasoningEffortByModel": {
+          "gpt-6-astra": "xhigh",
+          "gpt-5.6-sol": "high"
+        },
         "approvalPolicy": "never",
         "sandbox": "workspace-write"
+      }
+    },
+    {
+      "name": "antigravity-review",
+      "description": "Antigravity-powered review bot with explicit manual account selection",
+      "engine": "antigravity",
+      "feishuAppId": "cli_antigravity",
+      "feishuAppSecret": "secret5",
+      "defaultWorkingDirectory": "/home/user/project-review",
+      "antigravity": {
+        "model": "gemini-4-argon-low",
+        "sandbox": true,
+        "printTimeout": "20m",
+        "defaultAccount": "primary",
+        "accounts": {
+          "primary": {
+            "runner": "/opt/metabot/antigravity-accounts/primary/run-agy"
+          },
+          "backup": {
+            "runner": "/opt/metabot/antigravity-accounts/backup/run-agy"
+          }
+        }
       }
     }
   ],
@@ -63,6 +90,16 @@
       "defaultWorkingDirectory": "/home/user/project"
     }
   ],
+  "consensusProfiles": {
+    "default": {
+      "panelists": ["project-alpha", "project-beta", "project-gamma", "antigravity-review"],
+      "synthesizerBot": "project-delta",
+      "type": "architectural",
+      "stakes": "medium",
+      "costCapUsd": 5.0,
+      "maxRounds": 5
+    }
+  },
   "peers": [
     {
       "name": "alice",

@@ -9,6 +9,7 @@ Commands you can send to MetaBot in Feishu or Telegram.
 | `/reset` | Clear session — starts a fresh conversation |
 | `/stop` | Abort the currently running task |
 | `/status` | Show session info (session ID, working directory) |
+| `/dr <question>` | Start the Deep Research GUI SOP and export the report |
 | `/memory list` | Browse MetaMemory knowledge tree |
 | `/memory search <query>` | Search MetaMemory knowledge base |
 | `/sync` | Trigger MetaMemory → Feishu Wiki sync |

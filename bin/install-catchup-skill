@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Applied lessons: MEMORY-002, METABOT-CATCHUP-API-BYPASS-083,
+# METABOT-CATCHUP-NL-083, METABOT-CATCHUP-SKILL-DISCOVERY-080,
+# OPS-076, OPS-077, OPS-079, OPS-081, OPS-082, UX-001.
+
+SOURCE_ROOT="${METABOT_CATCHUP_SOURCE:-/root/metabot/src/skills/catchup}"
+SOURCE_SKILL="$SOURCE_ROOT/SKILL.md"
+SOURCE_SCRIPT="$SOURCE_ROOT/scripts/catchup_context.py"
+SOURCE_OPENAI_METADATA="$SOURCE_ROOT/agents/openai.yaml"
+
+for required in "$SOURCE_SKILL" "$SOURCE_SCRIPT" "$SOURCE_OPENAI_METADATA"; do
+  if [[ ! -f "$required" ]]; then
+    printf 'missing canonical catchup file: %s\n' "$required" >&2
+    exit 2
+  fi
+done
+
+copy_regular_file() {
+  local source_file="$1"
+  local target_file="$2"
+  local mode="$3"
+  local target_dir temp_file
+
+  target_dir="$(dirname "$target_file")"
+  mkdir -p "$target_dir"
+
+  if [[ -f "$target_file" && ! -L "$target_file" ]] && cmp -s "$source_file" "$target_file"; then
+    chmod "$mode" "$target_file"
+    return
+  fi
+
+  temp_file="$(mktemp "$target_dir/.catchup-install.XXXXXX")"
+  install -m "$mode" "$source_file" "$temp_file"
+  mv -Tf "$temp_file" "$target_file"
+}
+
+install_skill_copy() {
+  local target_root="$1"
+  copy_regular_file "$SOURCE_SKILL" "$target_root/SKILL.md" 644
+  copy_regular_file "$SOURCE_SCRIPT" "$target_root/scripts/catchup_context.py" 755
+  copy_regular_file "$SOURCE_OPENAI_METADATA" "$target_root/agents/openai.yaml" 644
+}
+
+declare -A target_roots=()
+for global_root in \
+  "$HOME/.agents/skills/catchup" \
+  "$HOME/.codex/skills/catchup" \
+  "$HOME/.claude/skills/catchup"
+do
+  target_roots["$global_root"]=1
+done
+
+for work_dir in "$@"; do
+  if [[ "$work_dir" != /* || "$work_dir" == / ]]; then
+    printf 'unsafe_workdir=%s\n' "$work_dir" >&2
+    exit 4
+  fi
+  if [[ ! -d "$work_dir" ]]; then
+    printf 'missing_workdir=%s\n' "$work_dir" >&2
+    exit 5
+  fi
+  target_roots["$work_dir/.agents/skills/catchup"]=1
+  target_roots["$work_dir/.claude/skills/catchup"]=1
+done
+
+while IFS= read -r target_root; do
+  install_skill_copy "$target_root"
+done < <(printf '%s\n' "${!target_roots[@]}" | sort)
+
+source_skill_sha="$(sha256sum "$SOURCE_SKILL" | awk '{print $1}')"
+source_script_sha="$(sha256sum "$SOURCE_SCRIPT" | awk '{print $1}')"
+source_metadata_sha="$(sha256sum "$SOURCE_OPENAI_METADATA" | awk '{print $1}')"
+
+while IFS= read -r target_root; do
+  target_skill_sha="$(sha256sum "$target_root/SKILL.md" | awk '{print $1}')"
+  target_script_sha="$(sha256sum "$target_root/scripts/catchup_context.py" | awk '{print $1}')"
+  target_metadata_sha="$(sha256sum "$target_root/agents/openai.yaml" | awk '{print $1}')"
+  if [[ -L "$target_root/SKILL.md" || -L "$target_root/scripts/catchup_context.py" || -L "$target_root/agents/openai.yaml" ]]; then
+    printf 'catchup regular-file check failed: %s\n' "$target_root" >&2
+    exit 3
+  fi
+  if [[ "$target_skill_sha" != "$source_skill_sha" || \
+        "$target_script_sha" != "$source_script_sha" || \
+        "$target_metadata_sha" != "$source_metadata_sha" ]]; then
+    printf 'catchup parity check failed: %s\n' "$target_root" >&2
+    exit 3
+  fi
+  printf 'catchup_skill_ready root=%s skill_sha=%s script_sha=%s metadata_sha=%s\n' \
+    "$target_root" "$target_skill_sha" "$target_script_sha" "$target_metadata_sha"
+done < <(printf '%s\n' "${!target_roots[@]}" | sort)

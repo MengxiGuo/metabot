@@ -20,6 +20,7 @@ import { ActivityStore } from './activity-store.js';
 import { SkillHubStore } from './skill-hub-store.js';
 import { metrics as _metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
+import type { ConsensusProfileConfig } from '../config.js';
 import {
   jsonResponse,
   handleVoiceRoutes,
@@ -51,6 +52,7 @@ interface ApiServerOptions {
   budgetManager?: BudgetManager;
   teamManager?: TeamManager;
   sessionRegistry?: SessionRegistry;
+  consensusProfiles?: Record<string, ConsensusProfileConfig>;
 }
 
 const startTime = Date.now();
@@ -58,7 +60,19 @@ const startTime = Date.now();
 (globalThis as any).__metabot_start_time = startTime;
 
 export function startApiServer(options: ApiServerOptions): http.Server {
-  const { port, secret, registry, scheduler, logger, botsConfigPath, docSync, feishuServiceClient, peerManager, memoryServerUrl, memoryAuthToken } = options;
+  const {
+    port,
+    secret,
+    registry,
+    scheduler,
+    logger,
+    botsConfigPath,
+    docSync,
+    feishuServiceClient,
+    peerManager,
+    memoryServerUrl,
+    memoryAuthToken,
+  } = options;
   const host = secret ? '0.0.0.0' : '127.0.0.1';
 
   // Initialize shared services
@@ -80,15 +94,28 @@ export function startApiServer(options: ApiServerOptions): http.Server {
 
   // Build route context (shared across all route handlers)
   const ctx: RouteContext = {
-    registry, scheduler, logger, botsConfigPath, docSync, feishuServiceClient,
-    peerManager, memoryServerUrl, memoryAuthToken,
-    asyncTaskStore, intentRouter, circuitBreaker, budgetManager,
-    teamManager, meetingService, voiceIdentityStore,
+    registry,
+    scheduler,
+    logger,
+    botsConfigPath,
+    docSync,
+    feishuServiceClient,
+    peerManager,
+    memoryServerUrl,
+    memoryAuthToken,
+    asyncTaskStore,
+    intentRouter,
+    circuitBreaker,
+    budgetManager,
+    teamManager,
+    meetingService,
+    voiceIdentityStore,
     rtcService: rtcService.isConfigured() ? rtcService : undefined,
     ws,
     sessionRegistry: options.sessionRegistry,
     activityStore,
     skillHubStore,
+    consensusProfiles: options.consensusProfiles,
   };
 
   // Route handlers in priority order
@@ -112,7 +139,9 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     // Auth check (exempt /web/, /memory/, /api/files/)
     if (secret && !url.startsWith('/web') && !url.startsWith('/memory') && !url.startsWith('/api/files/')) {
       const auth = req.headers.authorization;
-      const urlToken = url.includes('token=') ? new URL(url, `http://${req.headers.host || 'localhost'}`).searchParams.get('token') : null;
+      const urlToken = url.includes('token=')
+        ? new URL(url, `http://${req.headers.host || 'localhost'}`).searchParams.get('token')
+        : null;
       if (auth !== `Bearer ${secret}` && urlToken !== secret) {
         jsonResponse(res, 401, { error: 'Unauthorized' });
         return;

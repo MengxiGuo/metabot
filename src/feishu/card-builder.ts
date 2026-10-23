@@ -6,6 +6,7 @@ export type {
   CardState,
   BackgroundEvent,
   BackgroundTaskStatus,
+  GoalProgress,
 } from '../types.js';
 import type { CardState, CardStatus } from '../types.js';
 
@@ -37,6 +38,64 @@ function truncate(text: string, max: number): string {
   return text.slice(0, max) + '…';
 }
 
+function formatCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds >= 3600) return `${(seconds / 3600).toFixed(1)}h`;
+  if (seconds >= 60) return `${Math.round(seconds / 60)}min`;
+  return `${Math.max(0, Math.round(seconds))}s`;
+}
+
+function pushGoalProgress(elements: unknown[], state: CardState): void {
+  const goal = state.goalProgress;
+  if (!goal) return;
+
+  const runningTool = [...state.toolCalls].reverse().find((t) => t.status === 'running');
+  const completedTools = state.toolCalls.filter((t) => t.status === 'done').slice(-5);
+  const current = runningTool
+    ? `${runningTool.name} ${truncate(runningTool.detail.replace(/\n/g, ' '), 80)}`
+    : state.status === 'thinking'
+      ? 'starting turn'
+      : state.status === 'running'
+        ? state.responseText
+          ? 'drafting response'
+          : (goal.lastEvent ?? 'running')
+        : (goal.lastEvent ?? state.status);
+
+  const usageParts: string[] = [];
+  if (goal.tokensUsed !== undefined) {
+    const prefix = goal.estimated ? '~' : '';
+    usageParts.push(
+      `tokens ${prefix}${formatCount(goal.tokensUsed)}${goal.tokenBudget ? `/${formatCount(goal.tokenBudget)}` : ''}`,
+    );
+  }
+  if (goal.timeUsedSeconds !== undefined) {
+    usageParts.push(`time ${goal.estimated ? '~' : ''}${formatDuration(goal.timeUsedSeconds)}`);
+  }
+  if (goal.threadId) {
+    usageParts.push(`thread ${goal.threadId.slice(0, 8)}`);
+  }
+
+  const lines = [
+    `🎯 **Goal** \`${goal.status}\``,
+    `Objective: ${truncate(goal.objective, 180)}`,
+    usageParts.length > 0 ? `Usage: ${usageParts.join(' · ')}` : undefined,
+    `Now: ${truncate(current, 120)}`,
+    goal.lastEvent ? `Last: ${truncate(goal.lastEvent, 120)}` : undefined,
+    completedTools.length > 0 ? `Recent: ${completedTools.map((t) => `${t.name} done`).join(' · ')}` : undefined,
+  ].filter(Boolean);
+
+  elements.push({
+    tag: 'markdown',
+    content: lines.join('\n'),
+  });
+  elements.push({ tag: 'hr' });
+}
+
 // Feishu card patch API limit is 30KB total. Reserve ~5KB for card structure
 // (header, tool calls, JSON overhead). Use byte length since CJK chars = 3 bytes in UTF-8.
 const MAX_CONTENT_BYTES = 24000;
@@ -62,16 +121,50 @@ function truncateContent(text: string): string {
       break;
     }
   }
-  return (
-    text.slice(0, headEnd) +
-    '\n\n... (内容过长，中间部分已省略) ...\n\n' +
-    text.slice(tailStart)
-  );
+  return text.slice(0, headEnd) + '\n\n... (内容过长，中间部分已省略) ...\n\n' + text.slice(tailStart);
+}
+
+// Marker the assistant writes to delimit its final conclusion from the preceding
+// process/analysis, e.g. "━━━━━ 🎯 结论 ━━━━━". Matched loosely (≥3 heavy bars,
+// the word 结论 somewhere on the line).
+const CONCLUSION_MARKER_RE = /\n*[ \t]*━{3,}[^\n]*结论[^\n]*━{3,}[ \t]*\n*/;
+
+/**
+ * Split a turn's text into a "process" part and a "conclusion" part so the bridge
+ * can render them as two separate Feishu cards (user request: jump to the bottom
+ * card for the verdict, scroll up to the process card for the working).
+ *
+ * Priority:
+ *   1. An explicit conclusion marker the assistant wrote (semantic, precise).
+ *   2. Structural fallback: the LAST top-level text block is the conclusion and
+ *      everything before it is process (the model's natural explain→tool→sign-off).
+ * Returns null when there is nothing meaningful to separate (single short answer).
+ */
+export function splitProcessConclusion(segments: string[]): { process: string; conclusion: string } | null {
+  const clean = segments.map((s) => (s || '').trim()).filter(Boolean);
+  if (clean.length === 0) return null;
+  const full = clean.join('\n\n');
+
+  const m = full.match(CONCLUSION_MARKER_RE);
+  if (m && m.index !== undefined) {
+    const process = full.slice(0, m.index).trim();
+    const conclusion = full.slice(m.index + m[0].length).trim();
+    if (process && conclusion) return { process, conclusion };
+  }
+
+  if (clean.length >= 2) {
+    const conclusion = clean[clean.length - 1];
+    const process = clean.slice(0, -1).join('\n\n').trim();
+    if (process && conclusion) return { process, conclusion };
+  }
+  return null;
 }
 
 export function buildCard(state: CardState): string {
   const config = STATUS_CONFIG[state.status];
   const elements: unknown[] = [];
+
+  pushGoalProgress(elements, state);
 
   // Tool calls section
   if (state.toolCalls.length > 0) {
@@ -108,6 +201,12 @@ export function buildCard(state: CardState): string {
       tag: 'markdown',
       content: truncateContent(state.responseText),
     });
+  } else if (state.status === 'running') {
+    const elapsed = state.durationMs !== undefined ? ` · 已运行 ${formatDuration(state.durationMs / 1000)}` : '';
+    elements.push({
+      tag: 'markdown',
+      content: `_任务仍在执行${elapsed}_`,
+    });
   } else if (state.status === 'thinking') {
     elements.push({
       tag: 'markdown',
@@ -120,9 +219,7 @@ export function buildCard(state: CardState): string {
     elements.push({ tag: 'hr' });
     state.pendingQuestion.questions.forEach((q, qi) => {
       // Question prompt
-      const descLines = q.options.map(
-        (opt, i) => `**${i + 1}.** ${opt.label} — _${opt.description}_`,
-      );
+      const descLines = q.options.map((opt, i) => `**${i + 1}.** ${opt.label} — _${opt.description}_`);
       elements.push({
         tag: 'markdown',
         content: [`**[${q.header}] ${q.question}**`, '', ...descLines].join('\n'),
@@ -163,9 +260,7 @@ export function buildCard(state: CardState): string {
     const parts: string[] = [];
     if (state.totalTokens && state.contextWindow) {
       const pct = Math.round((state.totalTokens / state.contextWindow) * 100);
-      const tokensK = state.totalTokens >= 1000
-        ? `${(state.totalTokens / 1000).toFixed(1)}k`
-        : `${state.totalTokens}`;
+      const tokensK = state.totalTokens >= 1000 ? `${(state.totalTokens / 1000).toFixed(1)}k` : `${state.totalTokens}`;
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
       parts.push(`ctx: ${tokensK}/${ctxK} (${pct}%)`);
     }
@@ -175,13 +270,40 @@ export function buildCard(state: CardState): string {
       // Yh reset)` when quotaInfo is present. Other engines fall back to
       // the $-cost display.
       if (state.quotaInfo) {
-        const { usedPct, hoursToReset } = state.quotaInfo;
-        const resetStr = hoursToReset >= 1
-          ? `还有 ${hoursToReset.toFixed(1)}h reset`
-          : hoursToReset > 0
-            ? `还有 ${Math.round(hoursToReset * 60)}min reset`
-            : '即将 reset';
-        parts.push(`quota: ${usedPct.toFixed(1)}% used (${resetStr})`);
+        const { usedPct, hoursToReset, label, secondary, tertiary } = state.quotaInfo;
+        const shortReset = (h: number): string =>
+          h >= 24
+            ? `${(h / 24).toFixed(1)}d`
+            : h >= 1
+              ? `${h.toFixed(1)}h`
+              : h > 0
+                ? `${Math.round(h * 60)}min`
+                : '即将';
+        const resetStr =
+          hoursToReset >= 1
+            ? `还有 ${hoursToReset.toFixed(1)}h reset`
+            : hoursToReset > 0
+              ? `还有 ${Math.round(hoursToReset * 60)}min reset`
+              : '即将 reset';
+        if (secondary || tertiary) {
+          // Flat-tier engines may expose two or three windows (e.g. 5h/week/month).
+          const windows = [`${label ?? '5h'} ${usedPct.toFixed(1)}% (${shortReset(hoursToReset)})`];
+          if (secondary) {
+            windows.push(
+              `${secondary.label ?? '周'} ${secondary.usedPct.toFixed(1)}% (${shortReset(secondary.hoursToReset)})`,
+            );
+          }
+          if (tertiary) {
+            windows.push(
+              `${tertiary.label ?? '月'} ${tertiary.usedPct.toFixed(1)}% (${shortReset(tertiary.hoursToReset)})`,
+            );
+          }
+          parts.push(`quota: ${windows.join(' · ')}`);
+        } else if (label) {
+          parts.push(`quota: ${label} ${usedPct.toFixed(1)}% (${shortReset(hoursToReset)})`);
+        } else {
+          parts.push(`quota: ${usedPct.toFixed(1)}% used (${resetStr})`);
+        }
       } else if (state.sessionCostUsd != null) {
         parts.push(`$${state.sessionCostUsd.toFixed(2)}`);
       }
@@ -189,6 +311,9 @@ export function buildCard(state: CardState): string {
         // Strip the claude- prefix (claude-opus-4-7 → opus-4-7) but keep the
         // full Kimi model name since e.g. `for-coding` loses too much context.
         parts.push(state.model.replace(/^claude-/, ''));
+      }
+      if (state.reasoningEffort) {
+        parts.push(`effort: ${state.reasoningEffort}`);
       }
       if (state.durationMs !== undefined) {
         parts.push(`${(state.durationMs / 1000).toFixed(1)}s`);
@@ -214,7 +339,7 @@ export function buildCard(state: CardState): string {
     header: {
       template: config.color,
       title: {
-        content: `${config.icon} ${config.title}`,
+        content: state.cardLabel ? `${config.icon} ${state.cardLabel}` : `${config.icon} ${config.title}`,
         tag: 'plain_text',
       },
     },
@@ -231,6 +356,7 @@ export function buildCard(state: CardState): string {
       ? state.responseText.slice(0, 2000) + '\n\n... (内容过长已截断，请查看 PDF) ...'
       : '';
     const fallbackElements: unknown[] = [];
+    pushGoalProgress(fallbackElements, state);
     if (state.toolCalls.length > 0) {
       const toolLines = state.toolCalls.map((t) => {
         const icon = t.status === 'running' ? '⏳' : '✅';

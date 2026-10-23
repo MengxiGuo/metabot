@@ -9,6 +9,7 @@
 | `/reset` | 清除会话 — 开始全新对话 |
 | `/stop` | 中止当前任务 |
 | `/status` | 查看会话信息（会话 ID、工作目录） |
+| `/dr <问题>` | 启动 Deep Research GUI SOP，并导出报告 |
 | `/memory list` | 浏览 MetaMemory 知识库目录 |
 | `/memory search 关键词` | 搜索 MetaMemory 知识库 |
 | `/sync` | 触发 MetaMemory → 飞书知识库同步 |

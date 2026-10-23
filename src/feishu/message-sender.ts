@@ -13,6 +13,7 @@ export class MessageSender {
   constructor(
     private client: lark.Client,
     private logger: Logger,
+    private botName?: string,
   ) {}
 
   async sendCard(chatId: string, cardContent: string): Promise<string | undefined> {
@@ -31,7 +32,7 @@ export class MessageSender {
         this.logger.error({ resp }, 'Failed to get message_id from send response');
       }
       if (messageId) registerMsgChatMapping(messageId, chatId);
-      try { archiveOutgoing({ chatId, type: 'card', card: JSON.parse(cardContent), msgId: messageId, isUpdate: false }, this.logger); } catch {}
+      try { archiveOutgoing({ chatId, type: 'card', card: JSON.parse(cardContent), msgId: messageId, isUpdate: false, botName: this.botName }, this.logger); } catch {}
       return messageId;
     } catch (err) {
       this.logger.error({ err, chatId }, 'Failed to send card');
@@ -46,7 +47,7 @@ export class MessageSender {
         data: { content: cardContent },
       });
       const trueChatId = lookupChatIdByMsgId(messageId) || `msg:${messageId}`;
-      try { archiveOutgoing({ chatId: trueChatId, type: 'card', card: JSON.parse(cardContent), msgId: messageId, isUpdate: true }, this.logger); } catch {}
+      try { archiveOutgoing({ chatId: trueChatId, type: 'card', card: JSON.parse(cardContent), msgId: messageId, isUpdate: true, botName: this.botName }, this.logger); } catch {}
       return true;
     } catch (err) {
       this.logger.error({ err, messageId }, 'Failed to update card');
@@ -123,7 +124,7 @@ export class MessageSender {
           msg_type: 'image',
         },
       });
-      archiveOutgoing({ chatId, type: 'image', imageKey }, this.logger);
+      archiveOutgoing({ chatId, type: 'image', imageKey, botName: this.botName }, this.logger);
       return true;
     } catch (err) {
       this.logger.error({ err, chatId, imageKey }, 'Failed to send image');
@@ -167,7 +168,7 @@ export class MessageSender {
           msg_type: 'file',
         },
       });
-      archiveOutgoing({ chatId, type: 'file', fileKey }, this.logger);
+      archiveOutgoing({ chatId, type: 'file', fileKey, botName: this.botName }, this.logger);
       return true;
     } catch (err) {
       this.logger.error({ err, chatId, fileKey }, 'Failed to send file');
@@ -223,7 +224,7 @@ export class MessageSender {
           msg_type: 'text',
         },
       });
-      archiveOutgoing({ chatId, type: 'text', text }, this.logger);
+      archiveOutgoing({ chatId, type: 'text', text, botName: this.botName }, this.logger);
     } catch (err) {
       this.logger.error({ err, chatId }, 'Failed to send text');
     }

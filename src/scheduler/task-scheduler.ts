@@ -56,6 +56,8 @@ export interface RecurringTask {
   nextExecuteAt: number;      // Unix ms — precomputed next fire time
   lastExecutedAt?: number;    // Unix ms
   currentChildId?: string;    // ID of the currently pending/executing child task
+  autoPausedReason?: string;
+  pausedAt?: number;
 }
 
 export interface RecurringScheduleInput {
@@ -76,6 +78,17 @@ export interface RecurringUpdateInput {
   sendCards?: boolean;
 }
 
+export interface PausedRecurringSummary {
+  id: string;
+  label?: string;
+  cronExpr: string;
+}
+
+export interface PauseRecurringForChatResult {
+  activeCount: number;
+  paused: PausedRecurringSummary[];
+}
+
 // --- Persistence format ---
 
 interface PersistedData {
@@ -91,6 +104,7 @@ const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_SETTIMEOUT_MS = 2_147_483_647; // 2^31 - 1 (~24.8 days)
 const PERSIST_DIR = path.join(os.homedir(), '.metabot');
 const PERSIST_FILE = path.join(PERSIST_DIR, 'scheduled-tasks.json');
+const CHAT_BUSY_ERROR = 'Chat is busy with another task';
 
 /**
  * Manages scheduled tasks (one-time and recurring) with persistence and timers.
@@ -259,6 +273,7 @@ export class TaskScheduler {
     if (!recurring || recurring.status !== 'active') return false;
 
     recurring.status = 'paused';
+    recurring.pausedAt = Date.now();
     const timer = this.recurringTimers.get(id);
     if (timer) {
       clearTimeout(timer);
@@ -275,6 +290,8 @@ export class TaskScheduler {
     if (!recurring || recurring.status !== 'paused') return false;
 
     recurring.status = 'active';
+    recurring.autoPausedReason = undefined;
+    recurring.pausedAt = undefined;
     recurring.nextExecuteAt = nextCronOccurrence(recurring.cronExpr, recurring.timezone);
     this.setRecurringTimer(recurring);
     this.saveToDisk();
@@ -307,6 +324,29 @@ export class TaskScheduler {
 
   listRecurringTasks(): RecurringTask[] {
     return Array.from(this.recurringTasks.values()).filter((t) => t.status !== 'cancelled');
+  }
+
+  pauseActiveRecurringForChat(
+    botName: string,
+    chatId: string,
+    options: { onlyIfSingle?: boolean } = {},
+  ): PauseRecurringForChatResult {
+    const active = Array.from(this.recurringTasks.values()).filter(
+      (task) => task.status === 'active' && task.botName === botName && task.chatId === chatId,
+    );
+    if (options.onlyIfSingle && active.length !== 1) {
+      return { activeCount: active.length, paused: [] };
+    }
+
+    const paused: PausedRecurringSummary[] = [];
+    for (const task of active) {
+      if (this.pauseRecurring(task.id)) {
+        task.autoPausedReason = 'paused by /stop';
+        paused.push({ id: task.id, label: task.label, cronExpr: task.cronExpr });
+      }
+    }
+    if (paused.length > 0) this.saveToDisk();
+    return { activeCount: active.length, paused };
   }
 
   getRecurringTask(id: string): RecurringTask | undefined {
@@ -367,7 +407,9 @@ export class TaskScheduler {
       // Max retries exceeded — notify user and mark failed
       this.logger.warn({ taskId: id }, 'Scheduled task failed after max retries (chat busy)');
       task.status = 'failed';
+      const recurringBusyChild = this.recordRecurringBusyChildSkip(task);
       this.saveToDisk();
+      if (recurringBusyChild) return;
       try {
         await bot.sender.sendTextNotice(
           task.chatId,
@@ -409,6 +451,7 @@ export class TaskScheduler {
       task.status = result.success ? 'completed' : 'failed';
       if (!result.success) {
         this.logger.warn({ taskId: id, error: result.error }, 'Scheduled task completed with error');
+        this.recordRecurringBusyChildSkip(task, result.error);
       }
     } catch (err: any) {
       this.logger.error({ err, taskId: id }, 'Scheduled task execution error');
@@ -416,6 +459,27 @@ export class TaskScheduler {
     }
 
     this.saveToDisk();
+  }
+
+  private recordRecurringBusyChildSkip(
+    task: ScheduledTask,
+    error?: string,
+  ): boolean {
+    if (!task.parentRecurringId) return false;
+    if (error && !this.isChatBusyError(error)) return false;
+
+    const recurring = this.recurringTasks.get(task.parentRecurringId);
+    if (!recurring || recurring.status !== 'active') return false;
+
+    this.logger.warn(
+      { recurringId: recurring.id, childId: task.id, botName: recurring.botName, chatId: recurring.chatId },
+      'Recurring task instance skipped because chat stayed busy; recurring task remains active',
+    );
+    return true;
+  }
+
+  private isChatBusyError(error: string): boolean {
+    return error.includes(CHAT_BUSY_ERROR) || error.toLowerCase().includes('chat was busy');
   }
 
   // ===== Recurring timer internals =====
