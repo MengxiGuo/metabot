@@ -76,6 +76,9 @@ cmd="${1:-help}"
 shift 2>/dev/null || true
 
 case "$cmd" in
+  ask)
+    exec node "${METABOT_HOME:-$HOME/metabot}/bin/mb-ask.mjs" "$@"
+    ;;
   # --- Bot management ---
   bots|b)
     curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/bots" | _json

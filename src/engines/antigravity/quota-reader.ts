@@ -3,7 +3,7 @@ import type { SDKMessage } from '../claude/executor.js';
 
 const USAGE_TIMEOUT_MS = 15_000;
 const USAGE_MAX_BUFFER_BYTES = 2 * 1024 * 1024;
-const GEMINI_4_ARGON_CONTEXT_WINDOW = 1_048_576;
+const GEMINI_CONTEXT_WINDOW = 1_048_576;
 const CLAUDE_5_5_CONTEXT_WINDOW = 1_000_000;
 
 interface AntigravityQuotaBucket {
@@ -23,13 +23,14 @@ type QuotaWindow = Pick<QuotaInfo, 'usedPct' | 'hoursToReset' | 'label'>;
 
 /**
  * Resolve only context windows backed by either explicit configuration or
- * provider documentation. Gemini 4 Argon's unified input/output limit is
+ * provider documentation or the installed CLI's model metadata. Gemini 4
+ * Argon/Carbon and Gemini 3.8 Flash use the CLI's unified limit of
  * 1,048,576 tokens. Google Cloud documents 1,000,000 tokens for both Claude
  * Opus 5.5 and Sonnet 5.5. Unknown models deliberately return undefined.
  */
 export function resolveAntigravityContextWindow(model?: string, configured?: number): number | undefined {
   if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) return configured;
-  if (model && /^gemini-4-argon(?:-|$)/i.test(model)) return GEMINI_4_ARGON_CONTEXT_WINDOW;
+  if (model && /^gemini-(?:4-(?:argon|carbon)|3\.8-flash)(?:-|$)/i.test(model)) return GEMINI_CONTEXT_WINDOW;
   if (model && /^claude-(?:opus|sonnet)-5-5(?:-|$)/i.test(model)) return CLAUDE_5_5_CONTEXT_WINDOW;
   return undefined;
 }
@@ -41,7 +42,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function selectGroup(groups: AntigravityQuotaGroup[], model: string): AntigravityQuotaGroup | undefined {
   const normalizedModel = model.toLowerCase();
   if (normalizedModel.includes('argon')) {
-    return groups.find((group) => {
+    const dedicated = groups.find((group) => {
       const name = typeof group.name === 'string' ? group.name.toLowerCase() : '';
       const buckets = Array.isArray(group.buckets) ? (group.buckets as AntigravityQuotaBucket[]) : [];
       return (
@@ -53,6 +54,10 @@ function selectGroup(groups: AntigravityQuotaGroup[], model: string): Antigravit
         )
       );
     });
+    // Pro has a separate Argon pool; Ultra includes Argon in the shared
+    // Gemini pool. Prefer an existing dedicated pool even when exhausted or
+    // malformed: borrowing another pool would hide the real quota state.
+    if (dedicated) return dedicated;
   }
   if (normalizedModel.startsWith('gemini-')) {
     return groups.find((group) => {
@@ -62,7 +67,7 @@ function selectGroup(groups: AntigravityQuotaGroup[], model: string): Antigravit
         name === 'gemini models' ||
         buckets.some((bucket) => {
           const id = String(bucket.id ?? '').toLowerCase();
-          return id.startsWith('gemini-') && !id.includes('argon');
+          return id === 'gemini-weekly' || id === 'gemini-5h';
         })
       );
     });

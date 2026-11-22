@@ -1,10 +1,16 @@
+import { taskReplyEnv } from '../shared/task-reply.js';
 // Applied lessons: DELIVERY-CLOSURE-OUTCOME-035, GOAL-CONTINUITY-123,
 // JUDGMENT-001, MEMORY-002, METABOT-RAW-LOG-SECRET-037,
 // METABOT-SENSITIVE-CONFIG-036, REASONING-004.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { isAntigravityReasoningEffort, type AntigravityReasoningEffort, type AntigravityBotConfig, type BotConfigBase } from '../../config.js';
+import {
+  isAntigravityReasoningEffort,
+  type AntigravityReasoningEffort,
+  type AntigravityBotConfig,
+  type BotConfigBase,
+} from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import type { ApiContext, ExecutionHandle, ExecutorOptions, SDKMessage } from '../claude/executor.js';
@@ -17,6 +23,8 @@ import {
 import { resolveAntigravityAccount } from './account-config.js';
 import { fetchAntigravityQuota, resolveAntigravityContextWindow } from './quota-reader.js';
 import { isExplicitQuotaExhaustion, startQuotaFailover } from './quota-failover.js';
+import { hasDisqualifyingAntigravityStderr, verifyHistoricalInterruptionDetailed } from './historical-error.js';
+import { readAntigravityContextUsage } from './context-usage.js';
 
 function resolveAntigravityPath(): string {
   if (process.env.ANTIGRAVITY_EXECUTABLE_PATH) return process.env.ANTIGRAVITY_EXECUTABLE_PATH;
@@ -72,6 +80,8 @@ export function buildAntigravityArgs(
 }
 
 export type AntigravityFailureKind =
+  | 'print_timeout'
+  | 'stream_idle_timeout'
   | 'authentication_required'
   | 'quota_exhausted'
   | 'permission_blocked'
@@ -81,6 +91,8 @@ export type AntigravityFailureKind =
 
 /** Classify stderr without returning provider text, URLs, cookies, or tokens. */
 export function classifyAntigravityFailure(stderr: string): AntigravityFailureKind {
+  if (/print timeout after \d/i.test(stderr)) return 'print_timeout';
+  if (/stream idle timeout \([^)]*\): context deadline exceeded/i.test(stderr)) return 'stream_idle_timeout';
   if (/authentication required|not authenticated|sign[ -]?in|oauth|authorization code/i.test(stderr)) {
     return 'authentication_required';
   }
@@ -102,6 +114,10 @@ export function classifyAntigravityFailure(stderr: string): AntigravityFailureKi
 function safeFailureMessage(kind: AntigravityFailureKind, code: number | null, signal: NodeJS.Signals | null): string {
   const terminal = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
   switch (kind) {
+    case 'print_timeout':
+      return `Antigravity reached its configured print timeout (${terminal}). The task is incomplete; any partial output is preserved.`;
+    case 'stream_idle_timeout':
+      return `Antigravity's upstream response stream timed out (${terminal}). This is not a MetaBot quota error; the task was not replayed.`;
     case 'authentication_required':
       return `Antigravity authentication is required (${terminal}). Run agy interactively on this host and complete the official sign-in flow.`;
     case 'quota_exhausted':
@@ -126,7 +142,7 @@ export class AntigravityExecutor {
   startExecution(options: ExecutorOptions): ExecutionHandle {
     const config = this.config.antigravity;
     if (config?.quotaFailover === true && Object.keys(config.accounts ?? {}).length > 1) {
-      return startQuotaFailover(config, options, attempt => this.startSingleExecution(attempt));
+      return startQuotaFailover(config, options, (attempt) => this.startSingleExecution(attempt));
     }
     return this.startSingleExecution(options);
   }
@@ -137,12 +153,19 @@ export class AntigravityExecutor {
     const account = resolveAntigravityAccount(antigravityConfig, options.antigravityAccount);
     const fullPrompt = this.buildPromptWithContext(prompt, outputsDir, apiContext);
     const model = options.model ?? antigravityConfig.model;
-    const args = buildAntigravityArgs(antigravityConfig, fullPrompt, model, sessionId, options.antigravityReasoningEffort);
+    const args = buildAntigravityArgs(
+      antigravityConfig,
+      fullPrompt,
+      model,
+      sessionId,
+      options.antigravityReasoningEffort,
+    );
     const executable = account?.runner || antigravityConfig.executable || ANTIGRAVITY_EXECUTABLE;
     const executionEnv = {
       ...process.env,
       MB_CALLER_BOT: this.config.name,
       ...(antigravityConfig.env ?? {}),
+      ...taskReplyEnv(apiContext),
     };
     const queue = new AsyncQueue<SDKMessage>();
     const state = createAntigravityTranslatorState({
@@ -155,21 +178,32 @@ export class AntigravityExecutor {
     let child: ChildProcess | undefined;
     let stdoutBuffer = '';
     let stderr = '';
+    let stderrTruncated = false;
     let sawTerminalResult = false;
     let pendingResult: SDKMessage | undefined;
+    let providerResult: AntigravityJsonEvent['result'];
+    let malformedEvent = false;
     let observedWork = false;
     let quotaError = false;
 
     const emitEvent = (event: AntigravityJsonEvent): void => {
       if (event.event === 'result') {
-        quotaError = event.result?.status !== 'SUCCESS' && isExplicitQuotaExhaustion(event.result?.error ?? '');
+        providerResult = event.result;
+        quotaError =
+          event.result?.status !== 'SUCCESS' &&
+          !event.result?.finished_reason &&
+          isExplicitQuotaExhaustion(event.result?.error ?? '');
         // agy counts the submitted user input as one turn even on preflight quota rejection.
         if (event.result?.response || (event.result?.num_turns ?? 0) > 1) observedWork = true;
       } else if (event.event !== 'init') {
         const update = event.step_update;
-        const inputOrErrorOnly = event.event === 'step_update' && update?.state === 'DONE'
-          && (update.step_type === 'user_input' || update.step_type === 'error_message')
-          && !update.text_delta && !update.tool_name && !update.tool_info;
+        const inputOrErrorOnly =
+          event.event === 'step_update' &&
+          update?.state === 'DONE' &&
+          (update.step_type === 'user_input' || update.step_type === 'error_message') &&
+          !update.text_delta &&
+          !update.tool_name &&
+          !update.tool_info;
         // Includes buffered text/thinking/tool events and unknown progress.
         if (!inputOrErrorOnly) observedWork = true;
       }
@@ -190,6 +224,7 @@ export class AntigravityExecutor {
       try {
         emitEvent(JSON.parse(trimmed) as AntigravityJsonEvent);
       } catch {
+        malformedEvent = true;
         observedWork = true;
         this.logger.warn('Failed to parse Antigravity JSONL event (provider payload withheld)');
       }
@@ -240,7 +275,9 @@ export class AntigravityExecutor {
 
       child?.stdout?.on('data', processStdout);
       child?.stderr?.on('data', (chunk: Buffer) => {
-        stderr = (stderr + chunk.toString('utf-8')).slice(-32_768);
+        const combined = stderr + chunk.toString('utf-8');
+        stderrTruncated ||= combined.length > 32_768;
+        stderr = combined.slice(-32_768);
       });
       child?.on('error', (err: NodeJS.ErrnoException) => {
         if (sawTerminalResult) return;
@@ -283,8 +320,67 @@ export class AntigravityExecutor {
           });
         }
         if (pendingResult) {
+          // agy's resumed duration spans the conversation's lifetime, not this turn.
+          if (sessionId) pendingResult.duration_ms = Math.max(0, Date.now() - state.startTime);
+          const disqualifyingStderr = stderrTruncated || hasDisqualifyingAntigravityStderr(stderr);
+          const recoveryProcessEligible = !!pendingResult.is_error && !!providerResult && code === 0 && !signal &&
+            !abortController.signal.aborted && !malformedEvent && !disqualifyingStderr;
+          const verification = recoveryProcessEligible
+            ? await verifyHistoricalInterruptionDetailed(executable, sessionId, providerResult!, state)
+            : { verified: false, reason: 'process_ineligible' };
+          const recoveryVerified = verification.verified;
+          // Bounded metadata only: no response, prompt, stderr or provider payload.
+          // This makes conservative recovery vetoes observable in real invocations.
+          if (pendingResult.is_error && providerResult?.error?.includes('The stream was interrupted.')) {
+            this.logger.info({
+              engine: 'antigravity', historicalErrorRecoveryEvidence: true,
+              recoveryProcessEligible, recoveryVerified, verificationReason: verification.reason,
+              exitCode: code, signalled: !!signal, cancelled: abortController.signal.aborted,
+              malformedEvent, stderrBytes: Buffer.byteLength(stderr), hasConversation: !!sessionId,
+              sessionMatches: state.conversationId === sessionId,
+              providerStatus: providerResult.status === 'ERROR' ? 'ERROR' : 'other',
+              hasStopReason: !!providerResult.finished_reason, currentTurnError: state.currentTurnError,
+              userStep: state.currentUserStep, finalStep: state.latestStep?.step_index,
+              finalStepDone: state.latestStep?.state === 'DONE',
+              finalStepIsResponse: state.latestStep?.step_type === 'agent_response',
+              finalTextMatches: !!state.finalStepText.trim() && !!state.lastAgentText.trim() &&
+                providerResult.response?.trim() === state.lastAgentText.trim(),
+              multiResponseTurn: state.lastAgentText.trim() !== state.finalStepText.trim(),
+              disqualifyingStderr, stderrTruncated,
+            }, 'Historical interruption recovery evidence');
+          }
+          if (recoveryVerified && !abortController.signal.aborted) {
+            pendingResult.is_error = false;
+            pendingResult.subtype = 'success';
+            pendingResult.errors = undefined;
+            this.logger.info({ engine: 'antigravity', historicalErrorRecovered: true },
+              'Verified prior-turn interruption; current turn completed normally');
+          }
+          // A terminal JSON result cannot override an unsuccessful process exit.
+          if (!pendingResult.is_error && (code !== 0 || signal || abortController.signal.aborted)) {
+            pendingResult.is_error = true;
+            pendingResult.subtype = abortController.signal.aborted ? 'error_cancelled' : 'error_during_execution';
+            pendingResult.errors = [
+              abortController.signal.aborted
+                ? 'Antigravity execution was cancelled.'
+                : safeFailureMessage(classifyAntigravityFailure(stderr), code, signal),
+            ];
+          }
           if (pendingResult.is_error) pendingResult.antigravityFailure = failureEvidence;
           if (!pendingResult.is_error && state.model) {
+            const contextWindow = resolveAntigravityContextWindow(state.model, antigravityConfig.contextWindow);
+            if (contextWindow && contextWindow > 0) {
+              const usage = await readAntigravityContextUsage(
+                executable, state.conversationId, state.currentUserStep, state.latestStep?.step_index,
+              );
+              if (usage) {
+                pendingResult.tokenUsageKind = 'context';
+                pendingResult.modelUsage = {
+                  [state.model]: { inputTokens: usage.promptTokens, outputTokens: usage.completionTokens,
+                    contextWindow, costUSD: 0 },
+                };
+              }
+            }
             try {
               pendingResult.quotaInfo = await fetchAntigravityQuota(executable, state.model, executionEnv);
             } catch (err) {

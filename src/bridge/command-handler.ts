@@ -27,6 +27,7 @@ import {
   type CodexGoalStatus,
 } from '../engines/codex/goal.js';
 import { listAntigravityAccounts } from '../engines/antigravity/account-config.js';
+import { buildAccountDashboard } from '../engines/antigravity/account-dashboard.js';
 import { consensusControl } from '../orchestrator/consensus-control.js';
 import { antigravityEffortLevels, AntigravityModelCatalogError, fetchAntigravityModels } from '../engines/antigravity/model-catalog.js';
 
@@ -83,11 +84,12 @@ export class CommandHandler {
             '**Available Commands:**',
             '`/reset` - Clear session, start fresh',
             '`/stop` or `stop` - Cancel this chat’s consensus and current task; otherwise pause a single active schedule when safe',
+            '`/reply <回答>` - 直接回复当前问题或追加到运行中的 Codex app-server 任务，不排队',
             '`/status` - Show current session info',
             '`/model` - Show current engine/model; `/model list` - Available options',
             '`/model claude`, `/model kimi`, `/model codex`, `/model gemini`, or `/model antigravity` - Switch engine (resets session)',
             '`/model <name>` - Set model for current engine',
-            '`/account` - Show Antigravity account; `/account list|next|use <alias>` - Select it manually',
+            '`/account` - Current account quota; `/account list` - All account identities, quota and reset dates; `/account next|use <alias>` - Switch',
             '`/effort` - Show Codex/Antigravity reasoning effort; `/effort <level>|reset` - Change it',
             '`/context` - Show Codex context mode; `/context long|normal` - Switch it',
             '`/catchup [Nd]` - Recover this chat by date through SG, Mac, then 3060',
@@ -680,44 +682,39 @@ export class CommandHandler {
     }
 
     const aliases = listAntigravityAccounts(this.config.antigravity);
-    if (aliases.length === 0) {
-      await this.sender.sendTextNotice(
-        chatId,
-        'ℹ️ Single Antigravity Account',
-        'No named account runners are configured. The bot uses the single account authenticated for its default `agy` executable.',
-        'blue',
-      );
-      return;
-    }
-
     const current = this.effectiveAntigravityAccount(session.antigravityAccount);
     const normalized = args.trim().toLowerCase();
-    if (!normalized) {
-      await this.sender.sendTextNotice(
-        chatId,
-        '👤 Antigravity Account',
-        [
-          `**Current:** \`${current}\`${session.antigravityAccount ? ' (session override)' : ' (bot default)'}`,
-          '',
-          'Usage:',
-          '- `/account list` — Show configured aliases',
-          '- `/account use <alias>` — Select an account explicitly',
-          '- `/account next` — Select the next configured account',
-          '- `/account reset` — Return to the configured default',
-          '',
-          this.antigravityFailoverDescription(),
-        ].join('\n'),
-      );
+    if (!normalized || ['list', 'ls', 'dashboard', 'quota'].includes(normalized)) {
+      const sections = await buildAccountDashboard(this.config.antigravity, current, Boolean(normalized));
+      const help = [
+        '账号标识已脱敏；时间均为北京时间（UTC+8）；查询缓存最多 30 秒。',
+        '额度是服务端返回的额度池百分比，并非 token 数；不同模型池不能相加。',
+        '`/account list` 查看全部账号；`/account` 查看当前账号。',
+        '`/account use <alias>` 切换；`/account next` 下一个；`/account reset` 恢复默认。',
+        this.antigravityFailoverDescription(),
+      ].join('\n');
+      // One account per notice keeps the dashboard readable on phones and avoids card truncation.
+      for (let i = 0; i < sections.length; i++) {
+        try {
+          const delivered = await this.sender.sendTextNotice(
+            chatId,
+            '👥 Antigravity 账号看板',
+            sections[i] + (i === sections.length - 1 ? `\n\n${help}` : ''),
+          );
+          if (delivered !== false) continue;
+        } catch {
+          // Never forward provider error bodies or retry rejected identity content.
+        }
+        this.logger.warn({ chatId }, 'Antigravity account dashboard notice delivery failed');
+        await this.sender.sendText(chatId, '账号看板未能完整送达，消息平台拒绝或发送失败。账号未切换；请稍后重试 /account list。');
+        break;
+      }
       return;
     }
 
-    if (normalized === 'list' || normalized === 'ls') {
-      const lines = aliases.map((alias) => `- \`${alias}\`${alias === current ? ' ✅' : ''}`);
-      await this.sender.sendTextNotice(
-        chatId,
-        '👥 Antigravity Accounts',
-        [...lines, '', '_Aliases identify isolated account runners; credentials are not displayed._'].join('\n'),
-      );
+    if (aliases.length === 0) {
+      await this.sender.sendTextNotice(chatId, 'ℹ️ Single Antigravity Account',
+        'No named account runners are configured. Use `/account` to view the default account.', 'blue');
       return;
     }
 

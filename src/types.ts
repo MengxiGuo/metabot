@@ -13,6 +13,7 @@ export interface ToolCall {
 export interface PendingQuestion {
   toolUseId: string;
   questions: Array<{
+    answerKey?: string;
     question: string;
     header: string;
     options: Array<{ label: string; description: string }>;
@@ -61,6 +62,8 @@ export interface CardState {
   reasoningEffort?: CodexReasoningEffort;
   /** Total input+output tokens consumed */
   totalTokens?: number;
+  /** Cumulative usage must not be presented as context occupancy. */
+  tokenUsageKind?: 'context' | 'cumulative';
   /** Context window size of the primary model */
   contextWindow?: number;
   /** Cumulative session cost (USD), accumulated across queries until /reset */

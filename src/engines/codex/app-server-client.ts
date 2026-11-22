@@ -53,6 +53,11 @@ interface PendingRequest {
 type NotificationHandler = (notification: JsonRpcNotification) => void;
 type CloseHandler = (error?: Error) => void;
 type JsonRpcId = string | number;
+export interface ServerRequest {
+  id: JsonRpcId;
+  method: string;
+  params?: Record<string, unknown>;
+}
 
 function normalizeOrigin(value: unknown): string | null {
   if (typeof value !== 'string' || !value.trim()) return null;
@@ -69,6 +74,7 @@ export class CodexAppServerClient {
   private readonly pending = new Map<number, PendingRequest>();
   private readonly notificationHandlers = new Set<NotificationHandler>();
   private readonly closeHandlers = new Set<CloseHandler>();
+  private serverRequestHandler?: (request: ServerRequest) => boolean;
   private initialized = false;
   private stderr = '';
   private readonly stderrCapBytes = 64 * 1024;
@@ -138,6 +144,19 @@ export class CodexAppServerClient {
     return () => this.closeHandlers.delete(handler);
   }
 
+  onServerRequest(handler: (request: ServerRequest) => boolean): void {
+    this.serverRequestHandler = handler;
+  }
+
+  async respond(id: JsonRpcId, result: Record<string, unknown>): Promise<void> {
+    if (!this.child || this.child.stdin.destroyed) throw new Error('Codex input channel closed');
+    await new Promise<void>((resolve, reject) => {
+      this.child!.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n', err => {
+        if (err) reject(err); else resolve();
+      });
+    });
+  }
+
   async request<T = unknown>(method: string, params: Record<string, unknown>, timeoutMs = 120_000): Promise<T> {
     if (!this.child) throw new Error('Codex app-server is not started');
     const id = ++this.requestId;
@@ -203,7 +222,7 @@ export class CodexAppServerClient {
       return;
     }
 
-    if (typeof message.id === 'number' && this.pending.has(message.id)) {
+    if (!message.method && typeof message.id === 'number' && this.pending.has(message.id)) {
       const pending = this.pending.get(message.id)!;
       this.pending.delete(message.id);
       clearTimeout(pending.timer);
@@ -216,6 +235,7 @@ export class CodexAppServerClient {
     }
 
     if (typeof message.method === 'string' && (typeof message.id === 'number' || typeof message.id === 'string')) {
+      if (this.serverRequestHandler?.(message)) return;
       if (this.handleServerRequest(message)) return;
       this.replyUnhandledServerRequest(message.id, message.method);
       return;
@@ -297,5 +317,5 @@ export class CodexAppServerClient {
 }
 
 export function codexAppServerEnabled(config: CodexBotConfig | undefined): boolean {
-  return (config?.transport || process.env.CODEX_TRANSPORT) === 'app-server';
+  return (config?.transport || process.env.CODEX_TRANSPORT || 'app-server') === 'app-server';
 }

@@ -27,6 +27,7 @@ export interface AntigravityStepUpdate {
 export interface AntigravityResult {
   conversation_id?: string;
   status?: string;
+  finished_reason?: string;
   response?: string;
   error?: string;
   duration_seconds?: number;
@@ -57,6 +58,11 @@ export interface AntigravityTranslatorState {
   startTime: number;
   seenToolSteps: Set<number>;
   completedToolSteps: Set<number>;
+  currentUserStep?: number;
+  latestStep?: AntigravityStepUpdate;
+  finalStepText: string;
+  responseSteps: Map<number, string>;
+  currentTurnError: boolean;
 }
 
 export function createAntigravityTranslatorState(
@@ -73,6 +79,9 @@ export function createAntigravityTranslatorState(
     startTime: Date.now(),
     seenToolSteps: new Set<number>(),
     completedToolSteps: new Set<number>(),
+    finalStepText: '',
+    responseSteps: new Map<number, string>(),
+    currentTurnError: false,
   };
 }
 
@@ -158,9 +167,23 @@ export function translateAntigravityJsonEvent(
   if (event.event === 'step_update' && event.step_update) {
     const update = event.step_update;
     state.conversationId = update.conversation_id ?? state.conversationId;
-    if (update.step_type === 'agent_response' && update.text_delta) {
-      state.accumulatedDelta += update.text_delta;
-      return [];
+    // Recovery evidence is scoped to this invocation's user-input boundary.
+    if (update.step_type === 'user_input' && Number.isInteger(update.step_index)) {
+      state.currentUserStep = update.step_index;
+    }
+    if (update.step_type === 'error_message') state.currentTurnError = true;
+    if (state.latestStep?.step_index !== update.step_index) state.finalStepText = '';
+    state.latestStep = update;
+    if (update.step_type === 'agent_response') {
+      if (Number.isInteger(update.step_index) && update.text_delta) {
+        state.responseSteps.set(
+          update.step_index!,
+          (state.responseSteps.get(update.step_index!) ?? '') + update.text_delta,
+        );
+      }
+      state.finalStepText += update.text_delta ?? '';
+      if (update.text_delta) state.accumulatedDelta += update.text_delta;
+      return update.state === 'DONE' ? flushText(state) : [];
     }
     if (update.step_type === 'tool') {
       return translateToolStep(update, state);
@@ -180,7 +203,10 @@ export function translateAntigravityJsonEvent(
     }
   }
   const messages = flushText(state);
-  const providerSuccess = result.status === 'SUCCESS';
+  // A partial response can accompany SUCCESS. The CLI's explicit stop reason
+  // is authoritative; never turn a timed-out or cancelled task into success.
+  const stopReason = result.finished_reason;
+  const providerSuccess = result.status === 'SUCCESS' && !stopReason;
   const hasFinalResponse = state.lastAgentText.trim().length > 0;
   const success = providerSuccess && hasFinalResponse;
   const inputTokens = result.usage?.input_tokens ?? 0;
@@ -198,7 +224,7 @@ export function translateAntigravityJsonEvent(
 
   messages.push({
     type: 'result',
-    subtype: success ? 'success' : 'error_during_execution',
+    subtype: success ? 'success' : stopReason === 'interrupted' ? 'error_cancelled' : 'error_during_execution',
     session_id: state.conversationId,
     duration_ms:
       typeof result.duration_seconds === 'number'
@@ -210,11 +236,17 @@ export function translateAntigravityJsonEvent(
       ? undefined
       : [
           sanitizeAntigravityError(
-            providerSuccess && !hasFinalResponse
-              ? 'Antigravity reported success without a final response. The requested task may be incomplete.'
-              : result.error || `Antigravity ended with status ${result.status ?? 'UNKNOWN'}`,
+            stopReason === 'print_timeout'
+              ? 'Antigravity reached its configured print timeout. The response is partial and the task is incomplete.'
+              : stopReason === 'interrupted'
+                ? 'Antigravity execution was interrupted. The response may be partial.'
+                : providerSuccess && !hasFinalResponse
+                  ? 'Antigravity reported success without a final response. The requested task may be incomplete.'
+                  : result.error ||
+                    `Antigravity ended with status ${result.status ?? 'UNKNOWN'}${stopReason ? ` (${stopReason})` : ''}`,
           ),
         ],
+    tokenUsageKind: 'cumulative',
     modelUsage,
   });
   return messages;

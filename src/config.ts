@@ -134,7 +134,7 @@ export function isCodexReasoningEffort(value: unknown): value is CodexReasoningE
 /** Codex-specific overrides. Populated only when engine === 'codex'. */
 export interface CodexBotConfig {
   executable?: string;
-  /** Codex execution transport. 'exec' keeps the legacy codex exec path; 'app-server' enables official thread APIs like goal. */
+  /** Codex execution transport. Defaults to 'app-server' for active replies and thread APIs; explicit 'exec' keeps the legacy path. */
   transport?: 'exec' | 'app-server';
   model?: string;
   displayModel?: string;
@@ -297,7 +297,7 @@ export type AntigravityJsonConfig = AntigravityBotConfig;
 /** Codex-specific overrides in bots.json. */
 export interface CodexJsonConfig {
   executable?: string;
-  /** Codex execution transport. 'exec' keeps the legacy codex exec path; 'app-server' enables official thread APIs like goal. */
+  /** Codex execution transport. Defaults to 'app-server' for active replies and thread APIs; explicit 'exec' keeps the legacy path. */
   transport?: 'exec' | 'app-server';
   model?: string;
   displayModel?: string;
@@ -555,6 +555,7 @@ function buildCodexConfig(entry?: CodexJsonConfig): BotConfigBase['codex'] | und
     .map((origin) => origin.trim())
     .filter(Boolean);
   const cfg: BotConfigBase['codex'] = {
+    transport: 'app-server',
     ...(process.env.CODEX_EXECUTABLE_PATH ? { executable: process.env.CODEX_EXECUTABLE_PATH } : {}),
     ...(process.env.CODEX_TRANSPORT ? { transport: process.env.CODEX_TRANSPORT as CodexJsonConfig['transport'] } : {}),
     ...(process.env.CODEX_MODEL ? { model: process.env.CODEX_MODEL } : {}),

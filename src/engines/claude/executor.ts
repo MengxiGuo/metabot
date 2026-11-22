@@ -1,10 +1,16 @@
+import { taskReplyEnv } from '../shared/task-reply.js';
 import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
-import type { AntigravityReasoningEffort, BotConfigBase, CodexContextMode, CodexReasoningEffort } from '../../config.js';
+import type {
+  AntigravityReasoningEffort,
+  BotConfigBase,
+  CodexContextMode,
+  CodexReasoningEffort,
+} from '../../config.js';
 import type { GoalProgress } from '../../types.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
@@ -248,6 +254,8 @@ export function compactSession(
 export interface ApiContext {
   botName: string;
   chatId: string;
+  /** Per-execution capability for the cross-engine user-question channel. Never log. */
+  replyToken?: string;
   /** Group chat member names — enables inter-bot communication prompt. */
   groupMembers?: string[];
   /** Group ID — used to build grouptalk chatIds for inter-bot communication. */
@@ -311,6 +319,8 @@ export type SDKMessage = {
   is_error?: boolean;
   num_turns?: number;
   errors?: string[];
+  /** Whether usage describes one context or cumulative API consumption. */
+  tokenUsageKind?: 'context' | 'cumulative';
   // Model usage from result message (per-model breakdown)
   modelUsage?: Record<string, { inputTokens: number; outputTokens: number; contextWindow: number; costUSD: number }>;
   /** Flat-tier quota status (Gemini retrieveUserQuota / Codex rate_limits). Surfaces in card footer. */
@@ -345,6 +355,9 @@ export type SDKMessage = {
 
 export interface ExecutionHandle {
   stream: AsyncGenerator<SDKMessage>;
+  /** Submit text to the active turn; resolves only after the engine accepts it. */
+  steer?(text: string): Promise<void>;
+  supportsQuestions?: boolean;
   /** Latest low-level engine activity, including events not surfaced to the UI. */
   getLastActivityAt?(): number | undefined;
   sendAnswer(toolUseId: string, sessionId: string, answerText: string): void;
@@ -354,7 +367,7 @@ export interface ExecutionHandle {
    * sendAnswer enqueues a tool_result that never reaches the SDK because the
    * internal permission check short-circuits before auto-allow.
    */
-  resolveQuestion(toolUseId: string, answers: Record<string, string>): void;
+  resolveQuestion(toolUseId: string, answers: Record<string, string>): void | Promise<void>;
   finish(): void;
 }
 
@@ -388,7 +401,7 @@ export class ClaudeExecutor {
       // file:// URLs to native paths for the SDK CLI entrypoint.
       spawnClaudeCodeProcess: createSpawnFn({
         apiKey: this.config.claude.apiKey,
-        env: this.config.claude.env,
+        env: { ...this.config.claude.env, ...taskReplyEnv(apiContext) },
         authTokenFile: this.config.claude.authTokenFile,
         botName: this.config.name,
       }),

@@ -428,3 +428,7 @@ When implementing a feature or fixing a bug, follow this end-to-end workflow unl
 ### Consensus cancellation and preference isolation
 
 `orchestrator/consensus-control.ts` owns live run AbortControllers by exact task ID and origin chat plus eligible bots. Routes register before launching; `/stop` / exact `stop` and the specific stop API use the same controller. The bridge forwards abort to its current execution handle; session recovery and later orchestrator phases are gated. The terminal outcome is frozen before final card delivery; cancellation is `cancelled` / `aborted`, not success. Source chat preferences are seeded atomically once into a new isolated session, never its native session ID or usage. Production initializes persistent quota health at startup; offline fixtures use in-memory health unless explicitly given a temporary path. Do not weaken replay guards or confuse stop requests with rollback of tool side effects.
+
+### Antigravity historical-error recovery
+
+`historical-error.ts` verifies prior-turn interruption provenance using only the exact selected profile/conversation transcript, bounded to 32 MiB and two seconds. Executor recovery runs after clean process close, never in the translator based on text alone. Current error steps, stop reasons, stderr, malformed events and ambiguous/missing history preserve failure. Do not reset history or replay tools to fix a stale terminal error.

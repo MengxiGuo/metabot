@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import sharp from 'sharp';
@@ -61,15 +62,21 @@ interface PendingBatch {
   timerId: ReturnType<typeof setTimeout>;
 }
 
+export type TaskAnswer = { success: boolean; answer?: string; error?: string };
+
 interface RunningTask {
+  replyToken?: string;
+  externalQuestion?: { finish: (result: TaskAnswer) => void };
   abortController: AbortController;
   startTime: number;
   userId: string;
   executionHandle: ExecutionHandle;
   pendingQuestion: PendingQuestion | null;
+  replyInFlight?: boolean;
+  terminal?: boolean;
   /** Index of the question currently being displayed within pendingQuestion.questions */
   currentQuestionIndex: number;
-  /** Accumulated answers keyed by question header (for multi-question calls) */
+  /** Answers keyed by native question id, or full Claude question text. */
   collectedAnswers: Record<string, string>;
   cardMessageId: string;
   questionTimeoutId?: ReturnType<typeof setTimeout>;
@@ -503,6 +510,13 @@ export class MessageBridge {
     // the timer for drains that haven't fired yet.)
     this.cancelBackgroundDrain(chatId);
 
+    // /reply must bypass command rejection and the normal message queue.
+    const replyMatch = text.trim().match(/^\/reply(?:\s+([\s\S]*))?$/i);
+    if (replyMatch) {
+      await this.handleReply(msg, (replyMatch[1] || '').trim());
+      return;
+    }
+
     // Catchup is a deterministic archive workflow for both slash commands and
     // bounded natural-language requests. Route it before generic commands,
     // pending-question handling, or model-selected Lark/MetaBot tools.
@@ -552,6 +566,10 @@ export class MessageBridge {
 
     // Check if there's a pending question waiting for an answer
     const task = this.runningTasks.get(chatId);
+    if (task?.externalQuestion) {
+      await this.handleReply(msg, msg.text.trim());
+      return;
+    }
     if (task && task.pendingQuestion) {
       await this.handleAnswer(msg, task);
       return;
@@ -638,8 +656,97 @@ export class MessageBridge {
     await this.executeQuery(msg);
   }
 
+  /** Engine-independent waiting tool. The capability is scoped to this exact running task. */
+  async askUser(chatId: string, token: string, question: string, signal: AbortSignal): Promise<TaskAnswer> {
+    const task = this.runningTasks.get(chatId);
+    if (!task || !token || token !== task.replyToken || task.terminal || task.abortController.signal.aborted) {
+      return { success: false, error: 'No matching active task' };
+    }
+    if (task.externalQuestion || task.pendingQuestion) return { success: false, error: 'A question is already pending' };
+    if (!question.trim() || question.length > 4000) return { success: false, error: 'Question must be 1–4000 characters' };
+    let settle!: (result: TaskAnswer) => void;
+    const answer = new Promise<TaskAnswer>(resolve => { settle = resolve; });
+    let settled = false;
+    const finish = (result: TaskAnswer) => {
+      if (settled) return;
+      settled = true;
+      if (task.externalQuestion?.finish === finish) task.externalQuestion = undefined;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', cancelled);
+      task.abortController.signal.removeEventListener('abort', cancelled);
+      settle(result);
+    };
+    const cancelled = () => finish({ success: false, error: 'Question cancelled; no authorization granted' });
+    const timer = setTimeout(() => finish({ success: false, error: 'Question timed out; no authorization granted' }), QUESTION_TIMEOUT_MS);
+    task.externalQuestion = { finish };
+    signal.addEventListener('abort', cancelled, { once: true });
+    task.abortController.signal.addEventListener('abort', cancelled, { once: true });
+    if (signal.aborted || task.abortController.signal.aborted) cancelled();
+    if (!settled) {
+      try {
+        const delivered = await this.sender.sendTextNotice(chatId, '需要你的回答',
+          question + '\n\n请发送 /reply 你的回答；也可以直接回复文字。回答会交给当前任务，无需切换模式。', 'orange');
+        if (delivered === false) finish({ success: false, error: 'Question could not be delivered' });
+      } catch { finish({ success: false, error: 'Question could not be delivered' }); }
+    }
+    return answer;
+  }
+
+  private async handleReply(msg: IncomingMessage, answer: string): Promise<void> {
+    const { chatId } = msg;
+    if (!answer || answer.length > 16000 || msg.imageKey || msg.fileKey) {
+      await this.sender.sendTextNotice(chatId, '任务内回复',
+        '用法：/reply 你的回答（仅文字，最多 16000 字符）。例如 /reply 允许验证。', 'blue');
+      return;
+    }
+    const task = this.runningTasks.get(chatId);
+    if (!task || task.terminal || task.abortController.signal.aborted) {
+      await this.sender.sendTextNotice(chatId, '没有进行中的任务',
+        '当前没有可接收回答的任务。请直接发送普通消息继续。/reply 不会另开任务。', 'orange');
+      return;
+    }
+    if (task.userId !== msg.userId) {
+      await this.sender.sendTextNotice(chatId, '回答未提交', '请由当前任务的发起人回复。', 'orange');
+      return;
+    }
+    if (task.externalQuestion) {
+      task.externalQuestion.finish({ success: true, answer });
+      await this.sender.sendTextNotice(chatId, '回答已交给当前任务', '机器人将根据这条回答继续。', 'green');
+      return;
+    }
+    if (task.replyInFlight) {
+      await this.sender.sendTextNotice(chatId, '回答正在提交', '上一条回复仍在提交，请等待确认。', 'orange');
+      return;
+    }
+    if (task.pendingQuestion) {
+      await this.handleAnswer({ ...msg, text: answer }, task);
+      return;
+    }
+    if (!task.executionHandle.steer) {
+      await this.sender.sendTextNotice(chatId, '当前运行方式不支持任务内追加',
+        '这条回答未提交，也未排队。Codex 需要启用 app-server；其他引擎仅支持回复已显示的交互问题。', 'orange');
+      return;
+    }
+    task.replyInFlight = true;
+    try {
+      await task.executionHandle.steer(answer);
+      this.logger.info({ chatId, userId: msg.userId }, 'Active turn accepted user reply');
+      await this.sender.sendTextNotice(chatId, '回答已提交当前任务',
+        '引擎已接收，将在可处理输入的位置读取；没有加入普通消息队列。', 'green');
+    } catch {
+      await this.sender.sendTextNotice(chatId, '未确认回答送达',
+        '任务可能已经结束，或输入通道未返回确认。未加入普通消息队列；请先查看任务进度，避免重复授权。', 'orange');
+    } finally {
+      task.replyInFlight = false;
+    }
+  }
+
   private async handleAnswer(msg: IncomingMessage, task: RunningTask): Promise<void> {
     const { chatId, text, imageKey } = msg;
+    if (task.userId !== msg.userId || task.replyInFlight) {
+      await this.sender.sendTextNotice(chatId, '回答未提交', '请由任务发起人回复，并等待上一条提交完成。', 'orange');
+      return;
+    }
     const pending = task.pendingQuestion!;
 
     if (imageKey) {
@@ -653,7 +760,7 @@ export class MessageBridge {
 
     // Parse answer for the current question
     let answerText: string;
-    const num = parseInt(trimmed, 10);
+    const num = /^\d+$/.test(trimmed) ? Number(trimmed) : NaN;
     if (num >= 1 && num <= currentQuestion.options.length) {
       answerText = currentQuestion.options[num - 1].label;
     } else {
@@ -666,12 +773,11 @@ export class MessageBridge {
     // matches injected updatedInput.answers by exact question text. Keying by header
     // makes the SDK find no match and return EMPTY answers to the model ("selected
     // but nothing happened"). See sdk-tools.d.ts AskUserQuestionOutput.answers.
-    task.collectedAnswers[currentQuestion.question] = answerText;
+    task.collectedAnswers[currentQuestion.answerKey ?? currentQuestion.question] = answerText;
 
     this.logger.info(
       {
         chatId,
-        answer: answerText,
         questionIndex: task.currentQuestionIndex,
         total: pending.questions.length,
         toolUseId: pending.toolUseId,
@@ -715,6 +821,15 @@ export class MessageBridge {
     // tool_result path (kept inside ExecutionHandle.resolveQuestion).
     const collectedAnswers = task.collectedAnswers;
 
+    task.replyInFlight = true;
+    try {
+      await task.executionHandle.resolveQuestion(pending.toolUseId, collectedAnswers);
+    } catch {
+      await this.sender.sendTextNotice(chatId, '回答未提交', '问题可能已经失效或输入通道关闭，请查看最新任务状态。', 'orange');
+      return;
+    } finally {
+      task.replyInFlight = false;
+    }
     if (task.questionTimeoutId) {
       clearTimeout(task.questionTimeoutId);
       task.questionTimeoutId = undefined;
@@ -722,12 +837,13 @@ export class MessageBridge {
     task.pendingQuestion = null;
     task.currentQuestionIndex = 0;
     task.collectedAnswers = {};
-    task.processor.clearPendingQuestion();
+    task.processor.clearPendingQuestion(pending.toolUseId);
 
-    task.executionHandle.resolveQuestion(pending.toolUseId, collectedAnswers);
+    // The engine may finish while the answer RPC is in flight; do not overwrite its final card.
+    if (task.terminal || this.runningTasks.get(chatId) !== task) return;
 
     this.logger.info(
-      { chatId, answers: collectedAnswers, toolUseId: pending.toolUseId },
+      { chatId, toolUseId: pending.toolUseId },
       'Resolved AskUserQuestion hook with collected answers',
     );
 
@@ -787,8 +903,8 @@ export class MessageBridge {
     for (let i = task.currentQuestionIndex; i < pending.questions.length; i++) {
       const q = pending.questions[i];
       // Key by full question text (not header) — see note in handleAnswer.
-      if (!task.collectedAnswers[q.question]) {
-        task.collectedAnswers[q.question] = '用户未及时回复，请自行判断继续';
+      if (!task.collectedAnswers[q.answerKey ?? q.question]) {
+        task.collectedAnswers[q.answerKey ?? q.question] = '用户未回复；这不是授权。需要授权的操作必须保持未执行。';
       }
     }
 
@@ -796,9 +912,11 @@ export class MessageBridge {
     task.pendingQuestion = null;
     task.currentQuestionIndex = 0;
     task.collectedAnswers = {};
-    task.processor.clearPendingQuestion();
+    task.processor.clearPendingQuestion(pending.toolUseId);
 
-    task.executionHandle.resolveQuestion(pending.toolUseId, collectedAnswers);
+    Promise.resolve().then(() => task.executionHandle.resolveQuestion(pending.toolUseId,
+      task.executionHandle.supportsQuestions ? {} : collectedAnswers))
+      .catch(() => this.logger.warn({ chatId: task.chatId }, 'Expired question could not be resolved'));
   }
 
   /** Check if message is a media message with default (auto-generated) text. */
@@ -993,10 +1111,11 @@ export class MessageBridge {
         ? {
             botName: this.config.name,
             chatId,
+            replyToken: randomUUID(),
             groupMembers: [this.config.name, ...peerBots.filter((p) => p !== this.config.name)],
             groupId: chatId,
           }
-        : { botName: this.config.name, chatId };
+        : { botName: this.config.name, chatId, replyToken: randomUUID() };
 
     // Prepend incremental group history (other members' messages since this bot
     // last spoke). Empty string when no increment exists (same bot continuing
@@ -1034,6 +1153,7 @@ export class MessageBridge {
     // Register running task
     const startTime = Date.now();
     const runningTask: RunningTask = {
+      replyToken: apiContext.replyToken,
       abortController,
       startTime,
       userId,
@@ -1091,8 +1211,15 @@ export class MessageBridge {
         if (abortController.signal.aborted) break;
         if (message.type !== 'engine_heartbeat') resetIdleTimer();
 
+        if (message.type === 'question_resolved' && runningTask.pendingQuestion?.toolUseId === message.uuid) {
+          if (runningTask.questionTimeoutId) clearTimeout(runningTask.questionTimeoutId);
+          runningTask.pendingQuestion = null;
+          runningTask.currentQuestionIndex = 0;
+          runningTask.collectedAnswers = {};
+        }
         const state = processor.processMessage(message);
         lastState = state;
+        if (state.status === 'complete' || state.status === 'error') runningTask.terminal = true;
 
         // Update session ID if discovered
         const newSessionId = processor.getSessionId();
@@ -1102,7 +1229,7 @@ export class MessageBridge {
 
         // Check if we hit a waiting_for_input state
         if (state.status === 'waiting_for_input' && state.pendingQuestion) {
-          if (this.isCodexAppServerChat(chatId)) {
+          if (this.isCodexAppServerChat(chatId) && !executionHandle.supportsQuestions) {
             const errorMessage = this.codexAppServerQuestionError();
             this.logger.warn({ chatId }, 'Codex app-server emitted an unsupported interactive question');
             processor.clearPendingQuestion();
@@ -1123,6 +1250,7 @@ export class MessageBridge {
           }
 
           await rateLimiter.flush();
+          if (runningTask.pendingQuestion?.toolUseId !== state.pendingQuestion.toolUseId) continue;
 
           // Show only the current question (not all at once)
           const pending = runningTask.pendingQuestion;
@@ -1145,6 +1273,7 @@ export class MessageBridge {
           });
 
           // Set/reset timeout for auto-answer
+          if (runningTask.pendingQuestion?.toolUseId !== state.pendingQuestion.toolUseId) continue;
           if (runningTask.questionTimeoutId) {
             clearTimeout(runningTask.questionTimeoutId);
           }
@@ -1239,6 +1368,7 @@ export class MessageBridge {
         });
         executionHandle.finish();
         runningTask.executionHandle = retryHandle;
+        runningTask.terminal = false;
 
         for await (const message of retryHandle.stream) {
           if (abortController.signal.aborted) break;
@@ -1354,6 +1484,7 @@ export class MessageBridge {
           });
           executionHandle.finish();
           runningTask.executionHandle = retryHandle;
+          runningTask.terminal = false;
 
           for await (const message of retryHandle.stream) {
             if (abortController.signal.aborted) break;
@@ -1455,6 +1586,7 @@ export class MessageBridge {
       await rateLimiter.cancelAndWait();
       await this.sendFinalCard(messageId, errorState, chatId);
     } finally {
+      runningTask.externalQuestion?.finish({ success: false, error: 'Task ended before an answer' });
       clearTimeout(timeoutId);
       idleWatchdog.stop();
       if (runningTask.questionTimeoutId) {
@@ -1566,6 +1698,7 @@ export class MessageBridge {
     options.onUpdate?.(initialState, effectiveMessageId, false);
 
     const apiContext = {
+      replyToken: randomUUID(),
       botName: this.config.name,
       chatId,
       groupMembers: options.groupMembers,
@@ -1594,6 +1727,7 @@ export class MessageBridge {
 
     const startTime = Date.now();
     const runningTask: RunningTask = {
+      replyToken: apiContext.replyToken,
       abortController,
       startTime,
       userId,
@@ -1659,8 +1793,15 @@ export class MessageBridge {
         if (abortController.signal.aborted) break;
         if (message.type !== 'engine_heartbeat') resetIdleTimer();
 
+        if (message.type === 'question_resolved' && runningTask.pendingQuestion?.toolUseId === message.uuid) {
+          if (runningTask.questionTimeoutId) clearTimeout(runningTask.questionTimeoutId);
+          runningTask.pendingQuestion = null;
+          runningTask.currentQuestionIndex = 0;
+          runningTask.collectedAnswers = {};
+        }
         const state = processor.processMessage(message);
         lastState = state;
+        if (state.status === 'complete' || state.status === 'error') runningTask.terminal = true;
 
         const newSessionId = processor.getSessionId();
         if (newSessionId && newSessionId !== session.sessionId) {
@@ -1668,7 +1809,7 @@ export class MessageBridge {
         }
 
         if (state.status === 'waiting_for_input' && state.pendingQuestion) {
-          if (this.isCodexAppServerChat(chatId)) {
+          if (this.isCodexAppServerChat(chatId) && !executionHandle.supportsQuestions) {
             const errorMessage = this.codexAppServerQuestionError();
             this.logger.warn({ chatId }, 'API task: Codex app-server emitted an unsupported interactive question');
             processor.clearPendingQuestion();
@@ -1686,16 +1827,18 @@ export class MessageBridge {
             const answerJson = await options.onQuestion(pending);
             processor.clearPendingQuestion();
             // Parse answers from the caller's JSON and resolve the PreToolUse hook.
+            let answers: Record<string, string>;
             try {
               const parsed = JSON.parse(answerJson);
-              executionHandle.resolveQuestion(pending.toolUseId, parsed.answers || {});
+              answers = parsed.answers || {};
             } catch {
-              executionHandle.resolveQuestion(pending.toolUseId, { _answer: answerJson });
+              answers = { _answer: answerJson };
             }
+            await executionHandle.resolveQuestion(pending.toolUseId, answers);
           } else {
             // Auto-answer when no onQuestion handler is provided
             processor.clearPendingQuestion();
-            executionHandle.resolveQuestion(pending.toolUseId, { _auto: 'Please decide on your own and proceed.' });
+            await executionHandle.resolveQuestion(pending.toolUseId, {});
           }
           continue;
         }
@@ -1779,6 +1922,7 @@ export class MessageBridge {
         });
         executionHandle.finish();
         runningTask.executionHandle = retryHandle;
+        runningTask.terminal = false;
 
         for await (const message of retryHandle.stream) {
           if (abortController.signal.aborted) break;
@@ -1903,6 +2047,7 @@ export class MessageBridge {
           });
           executionHandle.finish();
           runningTask.executionHandle = retryHandle;
+          runningTask.terminal = false;
 
           for await (const message of retryHandle.stream) {
             if (abortController.signal.aborted) break;
@@ -1986,6 +2131,7 @@ export class MessageBridge {
       };
     } finally {
       options.signal?.removeEventListener('abort', onParentAbort);
+      runningTask.externalQuestion?.finish({ success: false, error: 'Task ended before an answer' });
       clearTimeout(timeoutId);
       idleWatchdog.stop();
       try {
@@ -2060,6 +2206,7 @@ export class MessageBridge {
       ...state,
       responseText: split.process,
       cardLabel: '过程 / 分析',
+      tokenUsageKind: undefined,
       costUsd: undefined,
       durationMs: undefined,
       model: undefined,
@@ -2081,6 +2228,7 @@ export class MessageBridge {
       responseText: split.conclusion,
       toolCalls: [],
       cardLabel: '🎯 结论',
+      tokenUsageKind: state.tokenUsageKind,
       costUsd: state.costUsd,
       durationMs: state.durationMs,
       model: state.model,

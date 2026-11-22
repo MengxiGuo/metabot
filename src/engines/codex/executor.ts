@@ -1,3 +1,4 @@
+import { taskReplyEnv } from '../shared/task-reply.js';
 import { execSync, spawn, type ChildProcess } from 'node:child_process';
 import type { BotConfigBase, CodexBotConfig, CodexContextMode, CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
@@ -13,6 +14,7 @@ import {
   enableCodexAppServerGoalOperation,
   translateCodexAppServerNotification,
 } from './app-server-translator.js';
+import { CodexUserInput } from './user-input.js';
 import type { CodexGoal } from './goal.js';
 import { buildCodexContextOverrideArgs } from './context-mode.js';
 import { codexReasoningEffortConfigArg, resolveCodexReasoningEffort } from './reasoning-effort.js';
@@ -265,6 +267,7 @@ export class CodexExecutor {
           // bridge can post the prompt as a visible card from this bot.
           MB_CALLER_BOT: this.config.name,
           ...(codexConfig.env ?? {}),
+          ...taskReplyEnv(apiContext),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -322,9 +325,8 @@ export class CodexExecutor {
             if (status?.reasoningEffort) {
               pendingResult.reasoningEffort = status.reasoningEffort;
             }
-            pendingResult.quotaInfo = await resolveCodexQuotaInfo(
-              status?.quota,
-              () => this.readCodexAccountQuota(codexConfig, state.model),
+            pendingResult.quotaInfo = await resolveCodexQuotaInfo(status?.quota, () =>
+              this.readCodexAccountQuota(codexConfig, state.model),
             );
             const mu = state.model ? pendingResult.modelUsage?.[state.model] : undefined;
             if (mu && status?.lastTurnInputTokens !== undefined) {
@@ -424,7 +426,7 @@ export class CodexExecutor {
     });
     if (options.codexGoal) enableCodexAppServerGoalOperation(state);
     const client = new CodexAppServerClient({
-      codexConfig,
+      codexConfig: { ...codexConfig, env: { ...codexConfig.env, ...taskReplyEnv(apiContext) } },
       contextMode: options.codexContextMode,
       reasoningEffort,
       logger: this.logger,
@@ -464,8 +466,19 @@ export class CodexExecutor {
       client.close();
     };
 
+    const userInput = new CodexUserInput(
+      client,
+      (message) => queue.enqueue(message),
+      () => activeThreadId,
+      () => activeTurnId,
+    );
+    client.onServerRequest((request) => !finished && userInput.handle(request));
+
     client.onNotification((notification) => {
       if (abortController.signal.aborted || finished) return;
+      if (notification.method === 'serverRequest/resolved') {
+        userInput.resolved(notification.params?.requestId);
+      }
       if (notification.method === 'turn/started') {
         const turnId = readAppServerTurnId(notification.params);
         if (turnId) {
@@ -650,20 +663,27 @@ export class CodexExecutor {
     return {
       stream: queue[Symbol.asyncIterator]() as AsyncGenerator<SDKMessage>,
       getLastActivityAt: () => client.getLastActivityAt(),
-      sendAnswer: (_toolUseId: string, _sid: string, _answerText: string) => {
-        this.logger.warn(
-          { engine: 'codex', transport: 'app-server' },
-          'sendAnswer called on Codex app-server executor — not implemented',
+      supportsQuestions: true,
+      steer: async (text: string) => {
+        if (finished || abortController.signal.aborted || !activeThreadId || !activeTurnId) {
+          throw new Error('No active Codex turn');
+        }
+        const expectedTurnId = activeTurnId;
+        const accepted = await client.request<{ turnId: string }>(
+          'turn/steer',
+          {
+            threadId: activeThreadId,
+            expectedTurnId,
+            input: [{ type: 'text', text }],
+          },
+          15_000,
         );
-        finishWithError('Codex app-server interactive answers are not supported yet.');
+        if (accepted.turnId !== expectedTurnId) throw new Error('Unexpected Codex turn acknowledgement');
       },
-      resolveQuestion: (_toolUseId: string, _answers: Record<string, string>) => {
-        this.logger.warn(
-          { engine: 'codex', transport: 'app-server' },
-          'resolveQuestion called on Codex app-server executor — not implemented',
-        );
-        finishWithError('Codex app-server interactive questions are not supported yet.');
+      sendAnswer: () => {
+        throw new Error('Use resolveQuestion for Codex user input');
       },
+      resolveQuestion: (id, answers) => userInput.resolve(id, answers),
       finish,
     };
   }

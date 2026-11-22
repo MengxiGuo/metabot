@@ -41,13 +41,14 @@ _写代码 · 管 Agent · 自动化一切_
 
 ![MetaBot Demo](resources/metabot-demo.gif)
 
+**想在自己的飞书里使用 Codex？** 准备好自己的飞书应用和 Codex 账号，按这份指南配置一个独立机器人。[飞书 + Codex 首次安装指南](docs/getting-started/feishu-codex-fork.zh.md)
+
+若使用 Claude 或 Kimi，可在 macOS / Linux 的 Bash 终端运行安装向导。首次安装请使用空目录。
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash
+git clone https://github.com/MengxiGuo/metabot.git "$HOME/metabot" &&
+  bash "$HOME/metabot/install.sh" --dir "$HOME/metabot"
 ```
-
-安装器引导一切：工作目录 → **引擎选择（Claude / Kimi / Codex）** → 订阅登录 → IM 平台 → PM2 自动启动。**5 分钟上手。**
-
-> 自定义安装目录(默认 `~/metabot`)：`curl ... | bash -s -- --dir /opt/metabot`,或 `METABOT_HOME=/opt/metabot bash install.sh`。Windows: `.\install.ps1 -Dir C:\opt\metabot`。
 
 ---
 
@@ -487,7 +488,7 @@ exceeds limit`），输出结构化 `errorCode/upstreamRequestId/retryable` 并�
 <summary><strong>手动安装</strong></summary>
 
 ```bash
-git clone https://github.com/xvirobotics/metabot.git
+git clone https://github.com/MengxiGuo/metabot.git
 cd metabot && npm install
 cp bots.example.json bots.json   # 编辑 Bot 配置
 cp .env.example .env              # 编辑全局设置
@@ -546,3 +547,7 @@ MetaBot 由 [XVI Robotics](https://xvirobotics.com) 打造（人形机器人大�
 独立讨论会话首次执行继承来源群同一 bot 的账号、模型、引擎、思考档位与工作目录，不继承原生会话 ID 或历史。继承只发生一次，后续阶段不覆盖讨论中自动换号的结果。
 
 反重力额度耗尽：明确的 `Resets in ...` 按实际剩余时长加 60 秒余量避让，按 runner 与额度组共享，并在服务重启后恢复；未知恢复时间仍冷却 5 分钟。不会因取消而换号重跑，也不会放宽已有的执行进展保护。
+
+### Antigravity 历史错误误报
+
+恢复旧对话时，仅在正常进程退出、本轮最终回复完成且所选账号的保存轨迹证明错误属于旧轮次时，忽略旧的 stream interrupted 终态误报。本轮错误、超时、取消或证据不足仍报失败；不会自动重跑任务。详见 [错误判定说明](docs/features/antigravity-engine.md#historical-interruption-in-resumed-conversations-2026-11-11)。

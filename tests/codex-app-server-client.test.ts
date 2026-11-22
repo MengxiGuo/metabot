@@ -122,3 +122,20 @@ describe('CodexAppServerClient activity tracking', () => {
     now.mockRestore();
   });
 });
+
+describe('bidirectional request routing', () => {
+  it('does not confuse an incoming question with an outgoing RPC having the same id', () => {
+    const { client } = createClient();
+    const resolve = vi.fn();
+    const timer = setTimeout(() => {}, 10000);
+    (client as any).pending.set(1, { resolve, reject: vi.fn(), timer, method: 'turn/steer' });
+    const question = vi.fn(() => true);
+    client.onServerRequest(question);
+    (client as any).handleLine(JSON.stringify({ id: 1, method: 'item/tool/requestUserInput', params: {} }));
+    expect(question).toHaveBeenCalledTimes(1);
+    expect(resolve).not.toHaveBeenCalled();
+    (client as any).handleLine(JSON.stringify({ id: 1, result: { turnId: 'turn' } }));
+    expect(resolve).toHaveBeenCalledWith({ turnId: 'turn' });
+    clearTimeout(timer);
+  });
+});

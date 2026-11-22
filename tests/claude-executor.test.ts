@@ -44,3 +44,33 @@ describe('ClaudeExecutor query options', () => {
     );
   });
 });
+
+it('passes task-scoped environment without adding question instructions to the SDK child', async () => {
+  const context = { botName: 'claude-test', chatId: 'chat', replyToken: 'fixture-task-token' };
+  const executor = new ClaudeExecutor(
+    { name: 'claude-test', engine: 'claude', claude: {} } as any,
+    { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() } as any,
+  );
+  const options = (executor as any).buildQueryOptions('/tmp', undefined, new AbortController(), undefined, context);
+  expect(options.systemPrompt.append).not.toContain('mb ask');
+  expect(options.systemPrompt.append).not.toContain(context.replyToken);
+  const child = options.spawnClaudeCodeProcess({
+    command: process.execPath,
+    args: [
+      '-e',
+      'console.log(JSON.stringify({token:process.env.MB_TASK_REPLY_TOKEN,chat:process.env.MB_REPLY_CHAT,bot:process.env.MB_REPLY_BOT}))',
+    ],
+    cwd: '/tmp',
+    env: {},
+  });
+  let output = '';
+  child.stdout.on('data', (d: Buffer) => {
+    output += d;
+  });
+  await new Promise<void>((resolve, reject) => {
+    child.on('close', (code: number) => (code === 0 ? resolve() : reject(new Error('child failed'))));
+    child.on('error', reject);
+  });
+  expect(JSON.parse(output)).toEqual({ token: context.replyToken, chat: context.chatId, bot: context.botName });
+  expect(process.env.MB_TASK_REPLY_TOKEN).not.toBe(context.replyToken);
+});

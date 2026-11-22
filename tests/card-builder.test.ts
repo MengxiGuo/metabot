@@ -3,6 +3,18 @@ import { buildCard, buildHelpCard, buildStatusCard, buildTextCard } from '../src
 import type { CardState } from '../src/types.js';
 
 describe('buildCard', () => {
+  it('separates two quota windows clearly without changing percentages or reset times', () => {
+    const card=JSON.parse(buildCard({status:'complete',userPrompt:'x',responseText:'done',toolCalls:[],
+      quotaInfo:{usedPct:17,hoursToReset:.9,label:'5h',secondary:{usedPct:5.5,hoursToReset:163.2,label:'周'}}}));
+    expect(card.elements.find((e:any)=>e.tag==='note').elements[0].content).toBe('quota: 5h 17.0% (54min) / 1周 5.5% (6.8d)');
+  });
+  it('labels all three windows and preserves monthly single-window formatting', () => {
+    const state:CardState={status:'complete',userPrompt:'x',responseText:'done',toolCalls:[],
+      quotaInfo:{usedPct:17,hoursToReset:1,label:'5h',secondary:{usedPct:5.5,hoursToReset:24,label:'周'},tertiary:{usedPct:1,hoursToReset:720,label:'月'}}};
+    const footer=(s:CardState)=>JSON.parse(buildCard(s)).elements.find((e:any)=>e.tag==='note').elements[0].content;
+    expect(footer(state)).toBe('quota: 5h 17.0% (1.0h) / 1周 5.5% (1.0d) / 1月 1.0% (30.0d)');
+    expect(footer({...state,quotaInfo:{usedPct:1,hoursToReset:720,label:'月'}})).toBe('quota: 月 1.0% (30.0d)');
+  });
   it('builds thinking card', () => {
     const state: CardState = {
       status: 'thinking',

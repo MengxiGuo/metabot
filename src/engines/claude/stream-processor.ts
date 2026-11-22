@@ -55,6 +55,7 @@ export class StreamProcessor {
   private _model: string | undefined;
   private _reasoningEffort: CardState['reasoningEffort'];
   private _totalTokens: number | undefined;
+  private _tokenUsageKind: CardState['tokenUsageKind'];
   private _contextWindow: number | undefined;
   private _quotaInfo:
     | {
@@ -104,6 +105,9 @@ export class StreamProcessor {
     }
 
     switch (message.type) {
+      case 'question_resolved':
+        this._pendingQuestions = this._pendingQuestions.filter(q => q.toolUseId !== message.uuid);
+        break;
       case 'system':
         // SDK emits task_started / task_progress / task_notification / task_updated
         // as type='system' with a specific subtype. Surface them so Feishu can
@@ -314,6 +318,7 @@ export class StreamProcessor {
     this.costUsd = message.total_cost_usd;
     this.durationMs = message.duration_ms;
     if (message.quotaInfo) this._quotaInfo = message.quotaInfo;
+    this._tokenUsageKind = message.tokenUsageKind;
     if (message.reasoningEffort) this._reasoningEffort = message.reasoningEffort;
 
     // Extract model usage info (per-model breakdown from SDK)
@@ -376,6 +381,7 @@ export class StreamProcessor {
       model: this._model,
       reasoningEffort: this._reasoningEffort,
       totalTokens: this._totalTokens,
+      tokenUsageKind: this._tokenUsageKind,
       contextWindow: this._contextWindow,
       quotaInfo: this._quotaInfo,
       goalProgress: this._goalProgress,
@@ -420,6 +426,7 @@ export class StreamProcessor {
     if (!Array.isArray(questions)) return;
 
     const parsed = questions.map((q: any) => ({
+      ...(typeof q.answerKey === 'string' ? { answerKey: q.answerKey } : {}),
       question: String(q.question || ''),
       header: String(q.header || ''),
       options: Array.isArray(q.options)
@@ -436,8 +443,9 @@ export class StreamProcessor {
   }
 
   /** Remove the first pending question (after it's been fully answered). */
-  clearPendingQuestion(): void {
-    this._pendingQuestions.shift();
+  clearPendingQuestion(toolUseId?: string): void {
+    if (toolUseId) this._pendingQuestions = this._pendingQuestions.filter(q => q.toolUseId !== toolUseId);
+    else this._pendingQuestions.shift();
   }
 
   /** Peek at the first pending question without removing it. */

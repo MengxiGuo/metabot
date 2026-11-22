@@ -14,7 +14,7 @@ function createLogger() {
 describe('/account command', () => {
   let sessionStoreDir: string;
   let sessionManager: SessionManager;
-  let sender: { sendTextNotice: ReturnType<typeof vi.fn> };
+  let sender: { sendTextNotice: ReturnType<typeof vi.fn>; sendText: ReturnType<typeof vi.fn> };
 
   const config = {
     name: 'antigravity-test',
@@ -36,7 +36,23 @@ describe('/account command', () => {
     sessionStoreDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-antigravity-account-'));
     process.env.SESSION_STORE_DIR = sessionStoreDir;
     sessionManager = new SessionManager('/tmp/test-dir', createLogger(), 'antigravity-test');
-    sender = { sendTextNotice: vi.fn().mockResolvedValue(undefined) };
+    sender = { sendTextNotice: vi.fn().mockResolvedValue(true), sendText: vi.fn().mockResolvedValue(undefined) };
+    for (const alias of ['primary', 'backup']) {
+      const profile = path.join(sessionStoreDir, alias);
+      fs.mkdirSync(path.join(profile, 'antigravity-cli'), { recursive: true });
+      fs.writeFileSync(path.join(profile, 'antigravity-cli/antigravity-oauth-token'),
+        JSON.stringify({ id_token_email: `${alias}@example.com`, token: 'private-test-credential' }));
+      const backend = path.join(profile, 'backend');
+      fs.writeFileSync(backend, `#!/bin/sh\ncat <<'JSON'\n${JSON.stringify({ status: 'SUCCESS', command: {
+        name: 'usage', data: { groups: [{ name: 'Gemini Models', buckets: [{
+          window: 'weekly', remaining_fraction: alias === 'primary' ? 0.75 : 0.9,
+          reset_time: '2026-11-08T00:00:00Z',
+        }] }] },
+      } })}\nJSON\n`, { mode: 0o755 });
+      const runner = path.join(profile, 'runner');
+      fs.writeFileSync(runner, `#!/bin/sh\nexec "${backend}" --gemini_dir="${profile}" "$@"\n`, { mode: 0o755 });
+      config.antigravity.accounts[alias].runner = runner;
+    }
   });
 
   afterEach(() => {
@@ -68,20 +84,67 @@ describe('/account command', () => {
     } as any;
   }
 
-  it('shows only the current alias and configured aliases', async () => {
+  it('shows current identity and all account quota/reset dates without changing session state', async () => {
+    sessionManager.setSessionId('chat1', 'keep-conversation');
     await createHandler().handle(message('/account'));
     expect(sender.sendTextNotice).toHaveBeenCalledWith(
       'chat1',
-      '👤 Antigravity Account',
-      expect.stringContaining('`primary` (bot default)'),
+      '👥 Antigravity 账号看板',
+      expect.stringContaining('pr…ry'),
     );
 
     sender.sendTextNotice.mockClear();
     await createHandler().handle(message('/account list'));
-    const body = sender.sendTextNotice.mock.calls[0][2] as string;
+    const body = sender.sendTextNotice.mock.calls.map(call => call[2]).join('\n');
     expect(body).toContain('`primary` ✅');
     expect(body).toContain('`backup`');
-    expect(body).not.toMatch(/oauth|token|@/i);
+    expect(body).toContain('ba…up');
+    expect(body).toContain('已用 25%');
+    expect(body).toContain('已用 10%');
+    expect(body).toContain('2026-11-08 08:00');
+    expect(body).not.toContain('private-test-credential');
+    expect(body).not.toContain('@example.com');
+    expect(sessionManager.getSession('chat1').sessionId).toBe('keep-conversation');
+    expect(sessionManager.getSession('chat1').antigravityAccount).toBeUndefined();
+  });
+
+  it('allows read-only dashboard queries during a running task', async () => {
+    await createHandler({ startTime: Date.now() }).handle(message('/account list'));
+    expect(sender.sendTextNotice.mock.calls).toHaveLength(2);
+    expect(sender.sendTextNotice.mock.calls[0][2]).toContain('pr…ry');
+    expect(sessionManager.getSession('chat1').antigravityAccount).toBeUndefined();
+  });
+
+  it.each(['false receipt', 'exception'])('reports %s without silently losing the dashboard', async (failure) => {
+    if (failure === 'false receipt') sender.sendTextNotice.mockResolvedValueOnce(false);
+    else sender.sendTextNotice.mockRejectedValueOnce(new Error('private-provider-detail'));
+    await createHandler().handle(message('/account list'));
+    expect(sender.sendTextNotice).toHaveBeenCalledTimes(1);
+    expect(sender.sendText).toHaveBeenCalledWith('chat1', expect.stringContaining('未能完整送达'));
+    expect(sender.sendText.mock.calls[0][1]).not.toMatch(/@|private-provider-detail/);
+    expect(sessionManager.getSession('chat1').antigravityAccount).toBeUndefined();
+  });
+
+  it('queries the default executable when no named accounts exist', async () => {
+    await createHandler(undefined, {
+      ...config, antigravity: { executable: config.antigravity.accounts.backup.runner },
+    }).handle(message('/account'));
+    expect(sender.sendTextNotice.mock.calls[0][2]).toContain('ba…up');
+  });
+
+  it('keeps healthy accounts visible when one runner fails', async () => {
+    fs.writeFileSync(config.antigravity.accounts.backup.runner, '#!/bin/sh\nexit 1\n');
+    await createHandler().handle(message('/account list'));
+    expect(sender.sendTextNotice.mock.calls[0][2]).toContain('pr…ry');
+    expect(sender.sendTextNotice.mock.calls[1][2]).toContain('使用量未知');
+    expect(sender.sendTextNotice.mock.calls[1][2]).not.toContain('已用 0%');
+  });
+
+  it('does not substitute another identity if the session account was removed', async () => {
+    sessionManager.setAntigravityAccount('chat1', 'removed');
+    await createHandler().handle(message('/account'));
+    expect(sender.sendTextNotice.mock.calls[0][2]).toContain('已不在配置中');
+    expect(sender.sendTextNotice.mock.calls[0][2]).not.toContain('pr…ry');
   });
 
   it('switches explicitly, persists the alias, and detaches the prior conversation', async () => {

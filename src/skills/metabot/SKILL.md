@@ -344,5 +344,4 @@ With active engine `antigravity`, use `/effort` to inspect the requested setting
 
 Preferences persist per bot + chat and take priority over `antigravity.effort`. A change starts a fresh engine conversation next turn; old history remains but is not inherited automatically. Busy tasks cannot be changed. `/reset` retains the preference; `/model reset` clears it. `/status` and `/model` report the requested setting, not measured internal reasoning.
 
-
 Consensus controls: `/stop` or the exact text `stop`, addressed to the initiating bot or a participant in the origin chat, cancels that chat's active consensus runs. Existing group mention requirements apply. Status `stopping` means cancellation requested; `cancelled` with result `aborted` means participant execution calls settled. Never relaunch a stopped discussion unless explicitly requested. Already completed tool side effects are not rolled back. Independent sessions inherit source-chat execution preferences once, without sharing native history or overwriting later account failover.

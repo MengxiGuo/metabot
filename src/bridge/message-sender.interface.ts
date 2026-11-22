@@ -11,8 +11,8 @@ export interface IMessageSender {
   /** Update an existing streaming card/message with new CardState. Returns false on failure. */
   updateCard(messageId: string, state: CardState): Promise<boolean>;
 
-  /** Send a simple notice message (for command responses: /help, /reset, /stop, etc.). */
-  sendTextNotice(chatId: string, title: string, content: string, color?: string): Promise<void>;
+  /** Send a command notice. False means delivery failed; void is legacy/unknown receipt. */
+  sendTextNotice(chatId: string, title: string, content: string, color?: string): Promise<void | boolean>;
 
   /** Send a plain text message. */
   sendText(chatId: string, text: string): Promise<void>;

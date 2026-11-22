@@ -243,7 +243,7 @@ export function buildCard(state: CardState): string {
     });
     elements.push({
       tag: 'markdown',
-      content: '_点击按钮选择，或直接输入自定义答案_',
+      content: '_点击按钮选择，或发送 /reply 选项编号或自定义答案_',
     });
   }
 
@@ -258,7 +258,10 @@ export function buildCard(state: CardState): string {
   // Stats note — show context usage during all states, full stats on complete/error
   {
     const parts: string[] = [];
-    if (state.totalTokens && state.contextWindow) {
+    if (state.totalTokens && state.tokenUsageKind === 'cumulative') {
+      const tokensK = state.totalTokens >= 1000 ? `${(state.totalTokens / 1000).toFixed(1)}k` : `${state.totalTokens}`;
+      parts.push(`累计 tokens: ${tokensK}`);
+    } else if (state.totalTokens && state.contextWindow) {
       const pct = Math.round((state.totalTokens / state.contextWindow) * 100);
       const tokensK = state.totalTokens >= 1000 ? `${(state.totalTokens / 1000).toFixed(1)}k` : `${state.totalTokens}`;
       const ctxK = `${Math.round(state.contextWindow / 1000)}k`;
@@ -286,19 +289,20 @@ export function buildCard(state: CardState): string {
               ? `还有 ${Math.round(hoursToReset * 60)}min reset`
               : '即将 reset';
         if (secondary || tertiary) {
+          const windowLabel = (value: string): string => value === '周' ? '1周' : value === '月' ? '1月' : value;
           // Flat-tier engines may expose two or three windows (e.g. 5h/week/month).
-          const windows = [`${label ?? '5h'} ${usedPct.toFixed(1)}% (${shortReset(hoursToReset)})`];
+          const windows = [`${windowLabel(label ?? '5h')} ${usedPct.toFixed(1)}% (${shortReset(hoursToReset)})`];
           if (secondary) {
             windows.push(
-              `${secondary.label ?? '周'} ${secondary.usedPct.toFixed(1)}% (${shortReset(secondary.hoursToReset)})`,
+              `${windowLabel(secondary.label ?? '周')} ${secondary.usedPct.toFixed(1)}% (${shortReset(secondary.hoursToReset)})`,
             );
           }
           if (tertiary) {
             windows.push(
-              `${tertiary.label ?? '月'} ${tertiary.usedPct.toFixed(1)}% (${shortReset(tertiary.hoursToReset)})`,
+              `${windowLabel(tertiary.label ?? '月')} ${tertiary.usedPct.toFixed(1)}% (${shortReset(tertiary.hoursToReset)})`,
             );
           }
-          parts.push(`quota: ${windows.join(' · ')}`);
+          parts.push(`quota: ${windows.join(' / ')}`);
         } else if (label) {
           parts.push(`quota: ${label} ${usedPct.toFixed(1)}% (${shortReset(hoursToReset)})`);
         } else {

@@ -45,6 +45,30 @@ export async function handleTaskRoutes(
 ): Promise<boolean> {
   const { registry, scheduler, logger, peerManager, asyncTaskStore, circuitBreaker, budgetManager, ws } = ctx;
 
+  // Current-task question channel: never creates a second agent task.
+  if (method === 'POST' && url === '/api/ask') {
+    const body = await parseJsonBody(req);
+    const { botName, chatId, token, question } = body;
+    if (typeof botName !== 'string' || typeof chatId !== 'string' ||
+      typeof token !== 'string' || typeof question !== 'string') {
+      jsonResponse(res, 400, { success: false, error: 'Missing question context' });
+      return true;
+    }
+    const bot = registry.get(botName);
+    if (!bot) {
+      jsonResponse(res, 404, { success: false, error: 'Bot not found' });
+      return true;
+    }
+    const controller = new AbortController();
+    const disconnected = () => controller.abort();
+    res.once('close', disconnected);
+    try {
+      const result = await bot.bridge.askUser(chatId, token, question, controller.signal);
+      if (!res.destroyed) jsonResponse(res, result.success ? 200 : 409, result);
+    } finally { res.removeListener('close', disconnected); }
+    return true;
+  }
+
   // GET /api/talk/:taskId — async task status
   if (method === 'GET' && url.startsWith('/api/talk/')) {
     const taskId = url.slice('/api/talk/'.length).split('?')[0];

@@ -215,7 +215,7 @@ describe('buildCodexArgs', () => {
             outputsBaseDir: '/tmp/metabot-test-outputs',
             downloadsDir: '/tmp/metabot-test-downloads',
           },
-          codex: { executable: fakeCodex, model: 'gpt-6-astra', reasoningEffort: 'max' },
+          codex: { transport: 'exec', executable: fakeCodex, model: 'gpt-6-astra', reasoningEffort: 'max' },
         } as any,
         logger as any,
       );

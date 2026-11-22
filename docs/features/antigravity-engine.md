@@ -108,9 +108,10 @@ Supported chat commands:
 - `/model list` queries `agy models` through the currently selected account
   runner and displays only that account's exact catalog. It never merges or
   falls back to another account's models.
-- `/account` shows the current safe alias.
-- `/account list` shows configured aliases, never credentials or email
-  addresses.
+- `/account` shows the current account's alias, redacted login identity, usage and reset dates.
+- `/account list` (also `ls`, `dashboard`, `quota`) shows all configured accounts
+  as separate mobile-friendly notices. Email identities are genuinely redacted
+  (partial local name only, no domain); credentials and provider errors are never displayed.
 - `/account use backup` selects an account and starts a fresh conversation on
   the next request.
 - `/account next` advances once in configuration order. It is an explicit user
@@ -120,6 +121,36 @@ Supported chat commands:
 Account switching is refused while a task is running. A quota, authentication,
 eligibility, permission, or provider error is returned to the user without
 trying another account.
+
+### Account dashboard (2026-11-01)
+
+The dashboard queries the existing read-only `--output-format json -p /usage`
+command through each account's exact configured runner. It shows every returned
+model pool and window independently, with used/remaining percentages and absolute
+reset dates in Asia/Shanghai (UTC+8). These are pool percentages, not token counts
+or proof that every model in a pool is available. Missing or invalid quota/reset
+fields remain unknown; failed queries never become zero usage. Expired provider
+reset dates are explicitly labelled as awaiting a provider update.
+
+Identity comes only from `id_token_email` in the selected profile's local
+`antigravity-cli/antigravity-oauth-token` file. Profile discovery supports one
+literal absolute `--gemini_dir` flag on the runner's `exec` command, including
+quoted paths and line continuations. It never guesses a profile from an alias,
+falls back to HOME, prints credentials, or forwards provider stderr. Custom or
+remote runners without this mapping show identity unknown while still querying
+their own quota. Files are bounded to 16 KiB. The display email may reflect the
+CLI's saved identity; it is not a separate online identity attestation.
+
+Queries share a 30-second cache and in-flight work across bots/chats. One usage
+subprocess runs at a time, with a 15-second timeout and 2 MiB output cap. For a local
+preview, run the following from the checkout with your configuration and bot name.
+
+```bash
+node --import tsx tools/antigravity-account-dashboard.ts ./bots.json YOUR_BOT_NAME
+```
+
+The Feishu formatter masks the local name and removes the email domain.
+A failed message receipt is reported as a delivery failure.
 
 ## Skills and agent-bus access
 
@@ -179,3 +210,102 @@ The durable `antigravityReasoningEffort` preference is isolated by bot and chat,
 Changing effort starts a fresh conversation on the next turn without deleting old records. Busy tasks, invalid/unsupported values, catalog failures, and session persistence errors are reported without claiming success. A concurrent model/account/effort change during catalog lookup aborts the pending change. The six normal/retry/context-recovery chat/API paths all forward the preference.
 
 The settings display is the requested effort and source, not a measured token budget. A returned init model variant is independent runtime evidence.
+
+## Timeout diagnostics and usage (2026-11-08)
+
+### Historical interruption in resumed conversations (2026-11-11)
+
+Some CLI results report an old `The stream was interrupted` error again after
+a later turn completes, with `status: ERROR` and `finished_reason: error`.
+MetaBot corrects only this exact failure after process exit zero, with no
+signal, cancellation, disqualifying stderr or malformed JSON events. Other stop reasons,
+including `print_timeout` and `interrupted`, remain failures.
+
+Recovery requires the current user-input boundary, a final DONE response
+matching the final segment, no current ERROR_MESSAGE, and independent saved history
+confirming that the exact interruption precedes this turn. The terminal result
+must match the full streamed turn response. The translator records raw text
+deltas in `responseSteps`, keyed by step index. Each current-turn response
+must match its saved MODEL/PLANNER_RESPONSE at that exact index after trimming
+only the segment edges; internal whitespace remains significant. Every nonempty
+streamed step must be present, and extra nonempty history responses are rejected.
+This tolerates agy's per-step trailing streaming newline being trimmed on export.
+Tool-only planner rows may omit `content` only when no streamed text is expected
+at that index; null/object content and missing expected response content fail.
+Raw streamed step text must also cover the entire streamed turn, preventing
+unverified terminal-only suffixes. Empty synthetic maps support only a
+single-segment compatibility fallback. Read
+`transcript_full.jsonl` preferentially; only ENOENT allows fallback to
+`transcript.jsonl`. Any content truncation marker, invalid full export,
+subsequent user turn, response mismatch or unresolved background task keeps
+the failure. Reads are bounded to 64 MiB per file, 4 MiB per UTF-8 line and
+two seconds, and file size/mtime must remain unchanged during verification.
+
+An intermediate MODEL/GENERIC ERROR is a completed tool error, not a stream
+failure. An exported RUNNING background snapshot must be closed by a later
+provider SYSTEM_MESSAGE for the exact same conversation/task with a valid
+timestamp and integer exit code (including nonzero). Only the two exact agy
+output-truncation headers (with/without a full-output file URI) may precede
+the command-exit line. Arbitrary intervening text cannot close the task.
+The final step must
+still be a DONE MODEL/PLANNER_RESPONSE. This verifies completion of the
+model turn, not success of every command or the user's research objective.
+
+Stderr allows only line-anchored agy print-mode progress: root-idle waiting
+for background tasks (both forms), the fully-idle wait timer, and daemon-task
+termination. Unknown lines, upstream errors and **background**-task termination
+still veto recovery. A truncated stderr buffer also vetoes recovery, so an
+error cannot be hidden by a later suffix of progress notices. Diagnostic logs
+include `multiResponseTurn`, `disqualifyingStderr`, `stderrTruncated` and
+`verificationReason`. The detailed verifier returns only bounded reason codes
+(e.g. `response_step_mismatch`, `background_task_unresolved`, `history_read_failed`);
+its boolean wrapper remains available. Exceptions never enter diagnostic text.
+
+Provider history and credentials are never changed and no request is replayed.
+Logs contain only bounded status/boolean metadata, never response or stderr
+text. Text, a DONE step or process exit zero alone cannot establish success.
+The seven-turn offline regression uses unchanged full-history prefixes and
+feeds each nonempty response through the translator with a trailing newline,
+including the 739..749 production regression. Reconstructed events and terminal
+state are explicitly labelled; this is not a captured live-stream end-to-end test.
+
+`agy` has an upstream stream-idle timeout independent of the CLI's
+`--print-timeout` and MetaBot's task/idle watchdogs. Changing one does not fix
+the others. CLI 1.5.3 is installed; its response-header retry fix does not
+claim to fix stream-idle failures.
+
+The translator honors `finished_reason` (available since CLI 1.4.11):
+`print_timeout` and `interrupted` remain failures even if the payload says
+SUCCESS and contains partial text. A current print timeout takes precedence
+over a possibly historical `error` string. Nonzero process exit also prevents
+success. Network timeouts do not trigger quota failover or task replay.
+Completed assistant steps are emitted before the final process result, while
+only a successful terminal result and process exit complete the task.
+
+Antigravity `result.usage` is cumulative model consumption, not current context
+occupancy. On a successful process result, the executor reads the selected
+profile's latest MODEL/PLANNER_RESPONSE usage in this invocation. Prompt tokens
+are `input_tokens + cache_read_tokens`; completion tokens are `output_tokens`.
+The context footer uses their sum. The final init-resolved model determines the
+window, with explicit configuration taking precedence. The installed CLI's
+Gemini 4 Argon/Carbon and Gemini 3.8 Flash families use 1,048,576 tokens; unknown
+models are not guessed.
+
+Numeric usage comes from `transcript.jsonl`, falling back to
+`transcript_full.jsonl` only on ENOENT. Reads are streamed, bounded to 64 MiB /
+4 MiB per line / two seconds, and rejected if the file changes, another user
+turn appears, or records exceed the streamed final step. Invalid/missing usage
+or unknown window retains the cumulative footer. Truncated prose is irrelevant
+to intact numeric usage fields. No credentials or model requests are involved.
+
+Resumed executions show local elapsed time from invocation start through child
+exit, rather than agy's conversation-lifetime `duration_seconds`. New sessions
+and standalone translator semantics are unchanged. Split cards suppress usage
+on the process card and preserve context/cumulative semantics on the conclusion.
+Only multi-window quota footers use `1周`/`1月` and ` / ` separators; single-window
+quota formatting and other engines' context calculations remain unchanged.
+
+For long tool-using tasks, the configured 20-minute print deadline may cut off
+a healthy task. A deployment may set `printTimeout: "0"` to use MetaBot's
+existing one-hour inactivity and 24-hour task limits instead. This is a
+separate operational configuration change, not a fix for upstream failures.

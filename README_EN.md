@@ -36,13 +36,12 @@
 
 ![MetaBot Demo](resources/metabot-demo.gif)
 
+**For Feishu with Codex**, follow the [fork setup guide (Chinese)](docs/getting-started/feishu-codex-fork.zh.md). For Claude or Kimi on macOS or Linux, run the interactive installer in Bash. Start with a fresh install directory.
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash
+git clone https://github.com/MengxiGuo/metabot.git "$HOME/metabot" &&
+  bash "$HOME/metabot/install.sh" --dir "$HOME/metabot"
 ```
-
-The installer walks you through everything: working directory → **engine choice (Claude / Kimi / Codex)** → subscription login → IM platform → auto-start with PM2. **5 minutes to get started.**
-
-> Custom install directory (default `~/metabot`): `curl ... | bash -s -- --dir /opt/metabot`, or `METABOT_HOME=/opt/metabot bash install.sh`. Windows: `.\install.ps1 -Dir C:\opt\metabot`.
 
 ---
 
@@ -458,7 +457,7 @@ CLI supports connecting to remote MetaBot/MetaMemory servers — configure `META
 <summary><strong>Manual install</strong></summary>
 
 ```bash
-git clone https://github.com/xvirobotics/metabot.git
+git clone https://github.com/MengxiGuo/metabot.git
 cd metabot && npm install
 cp bots.example.json bots.json   # edit with your bot configs
 cp .env.example .env              # edit global settings
@@ -511,3 +510,7 @@ Overrides persist per bot + chat, take precedence over `antigravity.effort`, and
 Address the initiating bot or a panelist in the origin chat with `/stop` or the exact text `stop` (normal group mention rules still apply). This cancels all associated live consensus runs in that chat and the current ordinary task; other chats and schedules are unaffected when a consensus matches. Use `mb consensus stop <taskId>` or `POST /api/consensus/:taskId/stop` for one specific run. Status transitions from `stopping` to `cancelled`, with result status `aborted`. Cancellation prevents further phases/retries and propagates to participant execution handles; it does not undo completed tool side effects.
 
 New isolated consensus sessions inherit source-chat execution preferences once, without native conversation history. Later phases retain any account failover. Antigravity explicit quota reset durations are persisted with a 60-second reserve, keyed by runner and quota group; unknown reset times retain a five-minute cooldown. Existing no-replay safeguards remain in force.
+
+### Antigravity historical interruption
+
+Resumed conversations may carry an old stream-interruption error in their terminal result. Recovery requires a clean process exit, a completed current response and independent saved-history evidence from the selected account. Current failures, timeouts, cancellation and ambiguous evidence remain failures; tasks are never replayed. See [completion checks](docs/features/antigravity-engine.md#historical-interruption-in-resumed-conversations-2026-11-11).
